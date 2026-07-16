@@ -1,6 +1,8 @@
 export type PatientProfile = {
   id: string
   display_name: string
+  date_of_birth?: string | null
+  biological_sex?: string | null
   created_at?: string
 }
 
@@ -26,6 +28,7 @@ export type Vital = {
 export type LabResult = {
   id: string
   test_name_raw: string
+  test_name_normalized: string | null
   value_text: string | null
   numeric_value: number | null
   unit: string | null
