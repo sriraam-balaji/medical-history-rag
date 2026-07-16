@@ -12,6 +12,25 @@ function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: { ...cors, 'Content-Type': 'application/json' } })
 }
 
+function requireDb<T>(result: { data: T; error: { message: string } | null }, context: string): T {
+  if (result.error) throw new Error(`${context}: ${result.error.message}`)
+  return result.data
+}
+
+function mimeTypeFor(filename: string): string {
+  const name = filename.toLowerCase()
+  if (name.endsWith('.pdf')) return 'application/pdf'
+  if (name.endsWith('.png')) return 'image/png'
+  if (name.endsWith('.webp')) return 'image/webp'
+  if (name.endsWith('.heic')) return 'image/heic'
+  return 'image/jpeg'
+}
+
+async function recordFailure(service: ReturnType<typeof createClient>, documentId: string, message: string) {
+  await service.from('extraction_jobs').insert({ document_id: documentId, status: 'failed_retryable', prompt_version: 'v1-fallback', schema_version: 'v1', error_message: message })
+  await service.from('documents').update({ processing_status: 'failed_retryable' }).eq('id', documentId)
+}
+
 async function uploadGeminiFile(bytes: Uint8Array, mimeType: string, displayName: string, apiKey: string) {
   const start = await fetch(`${GEMINI_UPLOAD}?key=${apiKey}`, {
     method: 'POST',
@@ -100,19 +119,18 @@ async function indexExtraction(service: ReturnType<typeof createClient>, documen
   const medications = asArray(patient.medications ?? root.medications ?? root.medicines).map((m) => ({ patient_id: document.patient_id, brand_name: m.brand_name ?? m.name ?? null, generic_name: m.generic_name ?? m.ingredient ?? null, strength: m.strength ?? m.dose ?? null, dosage_form: m.dosage_form ?? null, route: m.route ?? null, manufacturer: m.manufacturer ?? null, composition_status: m.composition_status ?? 'unknown', source_document_id: document.id, source_page: m.page ?? null, confidence: 0.8 }))
   const events = [...asArray(patient.appointments ?? root.appointments).map((e) => ({ event_date: dateOnly(e.date), event_type: 'appointment', title: String(e.type ?? 'Appointment'), summary: e.reason ?? null, source_page: e.page ?? null, evidence: JSON.stringify(e) })), ...asArray(patient.procedures ?? root.procedures).map((e) => ({ event_date: dateOnly(e.date), event_type: 'procedure', title: String(e.name ?? 'Procedure'), summary: e.status ?? null, source_page: e.page ?? null, evidence: JSON.stringify(e) }))].map((e) => ({ ...e, patient_id: document.patient_id, source_document_id: document.id, confidence: 0.85 }))
 
-  for (const table of ['medical_events', 'medications', 'vitals', 'lab_results']) await service.from(table).delete().eq('source_document_id', document.id)
-  if (events.length) await service.from('medical_events').insert(events)
-  if (medications.length) await service.from('medications').insert(medications)
-  if (vitals.length) await service.from('vitals').insert(vitals)
-  if (labs.length) await service.from('lab_results').insert(labs)
+  for (const table of ['medical_events', 'medications', 'vitals', 'lab_results']) requireDb(await service.from(table).delete().eq('source_document_id', document.id), `Clear ${table}`)
+  if (events.length) requireDb(await service.from('medical_events').insert(events), 'Insert medical events')
+  if (medications.length) requireDb(await service.from('medications').insert(medications), 'Insert medications')
+  if (vitals.length) requireDb(await service.from('vitals').insert(vitals), 'Insert vitals')
+  if (labs.length) requireDb(await service.from('lab_results').insert(labs), 'Insert lab results')
 
   const serialized = JSON.stringify(extracted)
   const chunks = serialized.match(/.{1,5000}/gs) ?? [serialized]
-  await service.from('document_chunks').delete().eq('document_id', document.id)
+  requireDb(await service.from('document_chunks').delete().eq('document_id', document.id), 'Clear document chunks')
   for (let index = 0; index < chunks.length; index++) {
     const embedding = await embedText(chunks[index], apiKey)
-    const { error } = await service.from('document_chunks').insert({ patient_id: document.patient_id, document_id: document.id, chunk_index: index, content: chunks[index], embedding: JSON.stringify(embedding), metadata: { source: 'gemini-embedding-2', model_version: EMBEDDING_MODEL } })
-    if (error) throw new Error(`Chunk insert failed: ${error.message}`)
+    requireDb(await service.from('document_chunks').insert({ patient_id: document.patient_id, document_id: document.id, chunk_index: index, content: chunks[index], embedding: `[${embedding.join(',')}]`, metadata: { source: 'gemini-embedding-2', model_version: EMBEDDING_MODEL } }), 'Insert document chunk')
   }
 }
 
@@ -133,14 +151,21 @@ Deno.serve(async (request) => {
 
   const uploadedFiles: Array<{ id: string; patient_id: string; uri: string; mimeType: string }> = []
   for (const document of documents) {
-    const { data: signed } = await service.storage.from('medical-documents').createSignedUrl(document.storage_path, 3600)
-    if (!signed?.signedUrl) continue
-    const source = await fetch(signed.signedUrl)
-    if (!source.ok) continue
-    const bytes = new Uint8Array(await source.arrayBuffer())
-    const mimeType = document.original_filename.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg'
-    const uploaded = await uploadGeminiFile(bytes, mimeType, document.original_filename, geminiKey)
-    uploadedFiles.push({ id: document.id, patient_id: document.patient_id, uri: uploaded.uri, mimeType })
+    try {
+      const claimed = await service.from('documents').update({ processing_status: 'processing' }).eq('id', document.id).eq('processing_status', 'queued').select('id').maybeSingle()
+      if (claimed.error) throw new Error(`Claim document: ${claimed.error.message}`)
+      if (!claimed.data) continue
+      const { data: signed } = await service.storage.from('medical-documents').createSignedUrl(document.storage_path, 3600)
+      if (!signed?.signedUrl) throw new Error('Could not create a signed URL for the stored file')
+      const source = await fetch(signed.signedUrl)
+      if (!source.ok) throw new Error(`Could not download stored file (${source.status})`)
+      const bytes = new Uint8Array(await source.arrayBuffer())
+      const mimeType = mimeTypeFor(document.original_filename)
+      const uploaded = await uploadGeminiFile(bytes, mimeType, document.original_filename, geminiKey)
+      uploadedFiles.push({ id: document.id, patient_id: document.patient_id, uri: uploaded.uri, mimeType })
+    } catch (error) {
+      await recordFailure(service, document.id, String(error))
+    }
   }
   if (!uploadedFiles.length) return json({ error: 'Could not upload documents to Gemini' }, 502)
 
@@ -161,18 +186,19 @@ Deno.serve(async (request) => {
       try {
         fallback = await runNormalFallback(file.uri, file.mimeType, geminiKey)
         await indexExtraction(service, file, fallback.validated, geminiKey)
-        await service.from('extraction_jobs').insert({ document_id: file.id, status: 'validated', raw_output: fallback.output, validated_output: fallback.validated, model_version: MODEL, prompt_version: 'v1-fallback', schema_version: 'v1' })
-        await service.from('documents').update({ processing_status: 'indexed', processed_at: new Date().toISOString() }).eq('id', file.id)
+        await service.from('extraction_jobs').delete().eq('document_id', file.id)
+        requireDb(await service.from('extraction_jobs').insert({ document_id: file.id, status: 'indexed', raw_output: fallback.output, validated_output: fallback.validated, model_version: MODEL, prompt_version: 'v1-fallback', schema_version: 'v1' }), 'Save extraction job')
+        requireDb(await service.from('documents').update({ processing_status: 'indexed', processed_at: new Date().toISOString() }).eq('id', file.id), 'Mark document indexed')
         fallbackResults.push({ id: file.id, status: 'indexed', embedding_model: EMBEDDING_MODEL })
       } catch (fallbackError) {
         const errorMessage = String(fallbackError)
         if (fallback) {
+          await service.from('extraction_jobs').delete().eq('document_id', file.id)
           await service.from('extraction_jobs').insert({ document_id: file.id, status: 'validated', raw_output: fallback.output, validated_output: fallback.validated, model_version: MODEL, prompt_version: 'v1-fallback', schema_version: 'v1', error_message: errorMessage })
           await service.from('documents').update({ processing_status: 'validated', processed_at: new Date().toISOString() }).eq('id', file.id)
           fallbackResults.push({ id: file.id, status: 'validated', error: errorMessage })
         } else {
-          await service.from('extraction_jobs').insert({ document_id: file.id, status: 'failed_retryable', model_version: MODEL, prompt_version: 'v1-fallback', schema_version: 'v1', error_message: errorMessage })
-          await service.from('documents').update({ processing_status: 'failed_retryable' }).eq('id', file.id)
+          await recordFailure(service, file.id, errorMessage)
           fallbackResults.push({ id: file.id, status: 'failed_retryable', error: errorMessage })
         }
       }

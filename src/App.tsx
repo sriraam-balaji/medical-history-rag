@@ -25,6 +25,10 @@ function App() {
   const [email, setEmail] = useState('')
   const [notice, setNotice] = useState('')
   const [deletingDocumentId, setDeletingDocumentId] = useState<string | null>(null)
+  const [documentErrors, setDocumentErrors] = useState<Record<string, string>>({})
+  const [question, setQuestion] = useState('')
+  const [answer, setAnswer] = useState('')
+  const [asking, setAsking] = useState(false)
 
   function tabFromHash() {
     const hash = window.location.hash.replace('#', '')
@@ -65,6 +69,14 @@ function App() {
     if (!vitalRows.error) setVitals((vitalRows.data ?? []) as Vital[])
     if (!labRows.error) setLabs((labRows.data ?? []) as LabResult[])
     if (!medRows.error) setMedicines((medRows.data ?? []) as Medication[])
+    if (!docs.error && docs.data?.length) {
+      const jobs = await supabase.from('extraction_jobs').select('document_id, error_message, created_at').in('document_id', docs.data.map((doc) => doc.id)).order('created_at', { ascending: false })
+      if (!jobs.error) {
+        const errors: Record<string, string> = {}
+        for (const job of jobs.data ?? []) if (job.error_message && !errors[job.document_id]) errors[job.document_id] = job.error_message
+        setDocumentErrors(errors)
+      }
+    }
   }
 
   async function loadPatients() {
@@ -106,8 +118,10 @@ function App() {
       }
       done += 1; setUploadProgress(done)
     }
-    const { error } = await supabase.functions.invoke('enqueue-gemini-batch')
-    setUploadingFiles(false); setNotice(error ? 'Files uploaded. Processing will retry when Gemini is available.' : 'Files uploaded and processing has started. This can take a few minutes on the free tier.')
+    const { data: processingResult, error } = await supabase.functions.invoke('enqueue-gemini-batch')
+    setUploadingFiles(false)
+    const failedResult = processingResult?.results?.find((result: { status: string; error?: string }) => result.error || result.status === 'failed_retryable')
+    setNotice(error ? `Files uploaded, but processing could not start: ${error.message}` : failedResult?.error ? `Upload completed, but processing failed: ${failedResult.error}` : 'Files uploaded and processing has started. This can take a few minutes on the free tier.')
     await refreshPatientData(selectedPatient); event.target.value = ''
   }
 
@@ -134,6 +148,17 @@ function App() {
     await refreshPatientData(selectedPatient)
   }
 
+  async function askArchive(event: React.FormEvent) {
+    event.preventDefault()
+    if (!supabase || !selectedPatient || !question.trim() || asking) return
+    setAsking(true); setAnswer('')
+    const { data, error } = await supabase.functions.invoke('ask-archive', { body: { patient_id: selectedPatient, question: question.trim() } })
+    setAsking(false)
+    if (error) setNotice(`Archive search failed: ${error.message}`)
+    else if (data?.error) setNotice(`Archive search failed: ${data.error}`)
+    else { setAnswer(data?.answer ?? 'No answer returned.'); setNotice('Answer generated from indexed records.') }
+  }
+
   function processingLabel(status: string) { return ({ queued: 'Queued', batch_submitted: 'Batch submitted', processing: 'Processing', validated: 'Extracted', indexed: 'Searchable', failed_retryable: 'Retrying', failed_permanent: 'Needs retry' } as Record<string, string>)[status] ?? status }
   function processingIcon(status: string) { if (status === 'indexed' || status === 'validated') return <CheckCircle2 size={13} />; if (status.includes('failed')) return <AlertCircle size={13} />; if (status === 'processing' || status === 'batch_submitted') return <LoaderCircle className="spin" size={13} />; return <Clock3 size={13} /> }
   const activePatient = useMemo(() => patients.find((p) => p.id === selectedPatient), [patients, selectedPatient])
@@ -141,11 +166,11 @@ function App() {
 
   if (!sessionEmail && supabaseConfigured) return <div className="auth-shell"><div className="auth-card"><div className="brand-mark"><HeartPulse size={22} /></div><p className="eyebrow">PRIVATE HEALTH ARCHIVE</p><h1>Keep the record together.</h1><p className="muted">A secure family workspace for documents, medicines, vitals, and timelines.</p><button className="primary full" onClick={() => setShowLogin(true)}><LogIn size={17} /> Sign in with email</button><p className="tiny">Each account only sees its own patient profiles.</p>{showLogin && <form className="login-form" onSubmit={sendMagicLink}><input type="email" required placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} /><button className="primary full" type="submit">Send secure link</button></form>}{notice && <p className="notice">{notice}</p>}</div></div>
 
-  const documentList = <div className="document-list">{documents.map((doc) => <div className="document-row" key={doc.id}><div className="file-icon"><FileText size={17} /></div><div className="document-name"><strong>{doc.original_filename}</strong><span>{doc.document_type ?? 'Awaiting classification'}</span></div><span className={`status ${doc.processing_status}`}>{processingIcon(doc.processing_status)} {processingLabel(doc.processing_status)}</span>{doc.processing_status !== 'indexed' && <button className="retry-button" onClick={() => retryDocument(doc)} disabled={deletingDocumentId === doc.id} aria-label="Retry processing" title="Retry processing"><RefreshCw size={14} /></button>}<button className="delete-button" onClick={() => deleteDocument(doc)} disabled={deletingDocumentId === doc.id} aria-label={`Delete ${doc.original_filename}`} title="Delete document">{deletingDocumentId === doc.id ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}</button></div>)}</div>
+  const documentList = <div className="document-list">{documents.map((doc) => <div className="document-row" key={doc.id}><div className="file-icon"><FileText size={17} /></div><div className="document-name"><strong>{doc.original_filename}</strong><span>{documentErrors[doc.id] ? 'Indexing needs retry' : doc.document_type ?? 'Awaiting classification'}</span></div><span className={`status ${doc.processing_status}`} title={documentErrors[doc.id]}>{processingIcon(doc.processing_status)} {documentErrors[doc.id] ? 'Needs retry' : processingLabel(doc.processing_status)}</span>{doc.processing_status !== 'indexed' && <button className="retry-button" onClick={() => retryDocument(doc)} disabled={deletingDocumentId === doc.id} aria-label="Retry processing" title="Retry processing"><RefreshCw size={14} /></button>}<button className="delete-button" onClick={() => deleteDocument(doc)} disabled={deletingDocumentId === doc.id} aria-label={`Delete ${doc.original_filename}`} title="Delete document">{deletingDocumentId === doc.id ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}</button></div>)}</div>
   const page = activeTab === 'Documents' ? <Page title="Document library" eyebrow="YOUR RECORDS"><div className="panel full-panel"><div className="panel-head"><div><p className="eyebrow">SOURCE FILES</p><h3>Every uploaded record</h3></div><span className="muted">{documents.length} file{documents.length === 1 ? '' : 's'}</span></div>{documents.length ? documentList : <Empty text="Upload a PDF or a clear photo of a medical page." />}</div></Page>
     : activeTab === 'Medicines' ? <Page title="Medicines" eyebrow="MEDICATION HISTORY"><div className="panel full-panel"><div className="panel-head"><div><p className="eyebrow">EXTRACTED MEDICINES</p><h3>Prescribed or mentioned</h3></div></div>{medicines.length ? medicines.map((med) => <div className="data-row" key={med.id}><strong>{med.brand_name || med.generic_name || 'Unnamed medicine'}</strong><span>{[med.generic_name, med.strength, med.dosage_form, med.route].filter(Boolean).join(' · ') || 'Details pending'}</span></div>) : <Empty text="Medicines will appear here when the extraction pipeline finds them." />}</div></Page>
     : activeTab === 'Vitals & labs' ? <Page title="Vitals & labs" eyebrow="STRUCTURED HISTORY"><div className="content-grid"><div className="panel"><div className="panel-head"><div><p className="eyebrow">VITALS</p><h3>Measurements</h3></div><strong>{vitals.length}</strong></div>{vitals.length ? vitals.map((v) => <div className="data-row" key={v.id}><strong>{v.vital_type}: {v.value} {v.unit ?? ''}</strong><span>{v.measured_at ? new Date(v.measured_at).toLocaleDateString() : 'Date not recorded'} · page {v.source_page ?? '—'}</span></div>) : <Empty text="No vitals extracted yet." />}</div><div className="panel"><div className="panel-head"><div><p className="eyebrow">LAB RESULTS</p><h3>Latest values</h3></div><strong>{labs.length}</strong></div>{labs.length ? labs.slice(0, 20).map((lab) => <div className="data-row" key={lab.id}><strong>{lab.test_name_raw}: {lab.value_text ?? lab.numeric_value ?? '—'} {lab.unit ?? ''}</strong><span>{lab.measured_at ? new Date(lab.measured_at).toLocaleDateString() : 'Date not recorded'} · page {lab.source_page ?? '—'}</span></div>) : <Empty text="Lab results will appear here after extraction." />}</div></div></Page>
-    : activeTab === 'Ask the archive' ? <Page title="Ask the archive" eyebrow="CITED SEARCH"><div className="panel full-panel ask-panel"><Search size={25} /><h3>Search across this patient’s records</h3><p className="muted">The archive will answer from extracted facts and document chunks, with source pages attached. Upload and indexing must finish before answers are available.</p><div className="ask-placeholder"><input placeholder="e.g. What lab values changed over time?" disabled /><button className="primary" disabled>Search after indexing</button></div></div></Page>
+    : activeTab === 'Ask the archive' ? <Page title="Ask the archive" eyebrow="CITED SEARCH"><div className="panel full-panel ask-panel"><Search size={25} /><h3>Search across this patient’s records</h3><p className="muted">Answers use only indexed records and include source references. This is an archive search, not a diagnosis.</p><form className="ask-placeholder" onSubmit={askArchive}><input value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="e.g. What lab values changed over time?" disabled={asking} /><button className="primary" type="submit" disabled={asking || !question.trim()}>{asking ? 'Searching…' : 'Search archive'}</button></form>{answer && <div className="answer-box"><strong>Archive answer</strong><p>{answer}</p></div>}</div></Page>
     : <Overview patient={activePatient} documents={documents} vitals={vitals} processingLabel={processingLabel} processingIcon={processingIcon} navigate={navigate} />
 
   return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark"><HeartPulse size={19} /></div><div><strong>Care Archive</strong><span>family health records</span></div></div><div className="side-section"><p className="side-label">WORKSPACE</p>{tabs.map((tab) => <button className={activeTab === tab ? 'side-link active' : 'side-link'} key={tab} onClick={() => navigate(tab)}>{tab === 'Documents' ? <FileText size={16} /> : tab === 'Vitals & labs' ? <Activity size={16} /> : tab === 'Ask the archive' ? <Search size={16} /> : <HeartPulse size={16} />}{tab}</button>)}</div><div className="side-bottom"><div className="privacy"><ShieldCheck size={17} /><span><strong>Private by default</strong><small>Source pages stay attached to every fact.</small></span></div>{sessionEmail && <button className="text-button" onClick={() => supabase?.auth.signOut()}>Sign out</button>}</div></aside><main className="main"><header className="topbar"><div><p className="eyebrow">YOUR ARCHIVE</p><h2>{activeTab}</h2></div><div className="top-actions">{sessionEmail && <span className="account"><UserRound size={15} /> {sessionEmail}</span>}<label className={uploadingFiles ? 'upload-button disabled' : 'upload-button'}><Upload size={16} /> {uploadingFiles ? `Uploading ${uploadProgress}/${uploadTotal}` : 'Upload files'}<input type="file" multiple accept="application/pdf,image/*" onChange={uploadFiles} disabled={uploadingFiles} /></label></div></header><section className="patient-bar"><div><span className="field-label">PATIENT PROFILE</span><select value={selectedPatient} onChange={(e) => setSelectedPatient(e.target.value)}>{displayPatients.map((patient) => <option key={patient.id} value={patient.id}>{patient.display_name}</option>)}</select></div><button className="secondary" onClick={() => { setPatientName(''); setShowProfileForm(true) }} disabled={!supabase}><Plus size={16} /> New profile</button></section>{notice && <div className="notice banner">{notice}</div>}{page}</main>{showProfileForm && supabase && <div className="modal-backdrop"><section className="profile-modal" role="dialog" aria-modal="true"><div className="modal-icon"><UserRound size={20} /></div><p className="eyebrow">WELCOME TO CARE ARCHIVE</p><h2>Who are these records for?</h2><p className="muted">Start by creating a patient profile. You can add more profiles later.</p><form onSubmit={createPatient}><label className="modal-label" htmlFor="patient-name">Patient name</label><input id="patient-name" autoFocus required placeholder="e.g. Mom, Dad, or Priya" value={patientName} onChange={(e) => setPatientName(e.target.value)} /><div className="modal-actions">{patients.length > 0 && <button type="button" className="secondary" onClick={() => setShowProfileForm(false)}>Cancel</button>}<button type="submit" className="primary" disabled={creatingPatient}>{creatingPatient ? 'Creating…' : 'Create profile'}</button></div></form></section></div>}</div>
