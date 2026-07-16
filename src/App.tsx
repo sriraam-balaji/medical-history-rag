@@ -81,8 +81,8 @@ function App() {
       const insert = await supabase.from('documents').insert({ id, patient_id: selectedPatient, original_filename: file.name, storage_path: path, processing_status: 'queued', created_by: userData.user?.id })
       if (insert.error) setNotice(insert.error.message)
     }
-    await supabase.functions.invoke('enqueue-gemini-batch')
-    setNotice('Files uploaded and queued for automatic processing.')
+    const { error: enqueueError } = await supabase.functions.invoke('enqueue-gemini-batch')
+    setNotice(enqueueError ? 'Files uploaded. Automatic processing will retry when Gemini is available.' : 'Files uploaded and queued for automatic processing.')
     const { data } = await supabase.from('documents').select('*').eq('patient_id', selectedPatient).order('created_at', { ascending: false })
     setDocuments((data ?? []) as DocumentRecord[])
   }
