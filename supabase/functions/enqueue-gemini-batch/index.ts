@@ -76,7 +76,7 @@ async function embedText(text: string, apiKey: string): Promise<number[]> {
   })
   if (!response.ok) throw new Error(`Embedding request failed: ${await response.text()}`)
   const result = await response.json()
-  const values = result.embedding?.values
+  const values = result.embeddings?.[0]?.values ?? result.embedding?.values
   if (!Array.isArray(values) || values.length !== 768) throw new Error(`Unexpected embedding dimensions: ${values?.length ?? 0}`)
   return values
 }
