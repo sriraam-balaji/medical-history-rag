@@ -6,6 +6,7 @@ const GEMINI_UPLOAD = 'https://generativelanguage.googleapis.com/upload/v1beta/f
 const MODEL = 'gemini-3.1-flash-lite'
 const PROMPT = 'Extract this historical medical document into JSON. Preserve exact dates, values, units, medicine instructions, uncertainty, and page references. Never infer missing facts. Distinguish prescribed, reported_taking, stopped, changed, completed, and unknown. Return JSON only.'
 const EMBEDDING_MODEL = 'gemini-embedding-2'
+const ENABLE_BATCH_API = Deno.env.get('ENABLE_GEMINI_BATCH') === 'true'
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: { ...cors, 'Content-Type': 'application/json' } })
@@ -143,9 +144,14 @@ Deno.serve(async (request) => {
   }
   if (!uploadedFiles.length) return json({ error: 'Could not upload documents to Gemini' }, 502)
 
-  const lines = uploadedFiles.map((file) => JSON.stringify({ key: file.id, request: { contents: [{ parts: [{ file_data: { mime_type: file.mimeType, file_uri: file.uri } }, { text: PROMPT }] }], generation_config: { response_mime_type: 'application/json' } } }))
-  const batchInput = await uploadGeminiFile(new TextEncoder().encode(lines.join('\n')), 'application/jsonl', `medical-batch-${Date.now()}.jsonl`, geminiKey)
-  const batch = await fetch(`${GEMINI}/batches?key=${geminiKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: `models/${MODEL}`, src: batchInput.name, config: { display_name: `medical-batch-${Date.now()}` } }) })
+  let batch: Response
+  if (ENABLE_BATCH_API) {
+    const lines = uploadedFiles.map((file) => JSON.stringify({ key: file.id, request: { contents: [{ parts: [{ file_data: { mime_type: file.mimeType, file_uri: file.uri } }, { text: PROMPT }] }], generation_config: { response_mime_type: 'application/json' } } }))
+    const batchInput = await uploadGeminiFile(new TextEncoder().encode(lines.join('\n')), 'application/jsonl', `medical-batch-${Date.now()}.jsonl`, geminiKey)
+    batch = await fetch(`${GEMINI}/batches?key=${geminiKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: `models/${MODEL}`, src: batchInput.name, config: { display_name: `medical-batch-${Date.now()}` } }) })
+  } else {
+    batch = new Response('Batch API disabled; using normal generation.', { status: 503 })
+  }
 
   if (!batch.ok) {
     const reason = await batch.text()
