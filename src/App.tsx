@@ -127,9 +127,10 @@ function App() {
     if (!supabase || deletingDocumentId) return
     setDeletingDocumentId(document.id)
     const { error: updateError } = await supabase.from('documents').update({ processing_status: 'queued', processed_at: null }).eq('id', document.id)
-    if (!updateError) await supabase.functions.invoke('enqueue-gemini-batch')
+    const { data: processingResult, error: functionError } = updateError ? { data: null, error: updateError } : await supabase.functions.invoke('enqueue-gemini-batch')
     setDeletingDocumentId(null)
-    setNotice(updateError ? `Could not retry processing: ${updateError.message}` : 'Processing restarted. The free tier may take a few minutes.')
+    const result = processingResult?.results?.find((item: { id: string }) => item.id === document.id)
+    setNotice(updateError || functionError ? `Could not restart processing: ${(updateError ?? functionError)?.message}` : result?.error ? `Extraction completed, but indexing reported: ${result.error}` : result?.status === 'indexed' ? 'Processing complete. The document is now searchable.' : 'Processing restarted. Check the document status for the backend result.')
     await refreshPatientData(selectedPatient)
   }
 

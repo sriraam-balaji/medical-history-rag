@@ -151,15 +151,24 @@ Deno.serve(async (request) => {
     const reason = await batch.text()
     const fallbackResults = []
     for (const file of uploadedFiles) {
+      let fallback: { output: unknown; validated: unknown } | null = null
       try {
-        const fallback = await runNormalFallback(file.uri, file.mimeType, geminiKey)
+        fallback = await runNormalFallback(file.uri, file.mimeType, geminiKey)
         await indexExtraction(service, file, fallback.validated, geminiKey)
         await service.from('extraction_jobs').insert({ document_id: file.id, status: 'validated', raw_output: fallback.output, validated_output: fallback.validated, model_version: MODEL, prompt_version: 'v1-fallback', schema_version: 'v1' })
         await service.from('documents').update({ processing_status: 'indexed', processed_at: new Date().toISOString() }).eq('id', file.id)
         fallbackResults.push({ id: file.id, status: 'indexed', embedding_model: EMBEDDING_MODEL })
       } catch (fallbackError) {
-        await service.from('documents').update({ processing_status: 'failed_retryable' }).eq('id', file.id)
-        fallbackResults.push({ id: file.id, status: 'failed_retryable', error: String(fallbackError) })
+        const errorMessage = String(fallbackError)
+        if (fallback) {
+          await service.from('extraction_jobs').insert({ document_id: file.id, status: 'validated', raw_output: fallback.output, validated_output: fallback.validated, model_version: MODEL, prompt_version: 'v1-fallback', schema_version: 'v1', error_message: errorMessage })
+          await service.from('documents').update({ processing_status: 'validated', processed_at: new Date().toISOString() }).eq('id', file.id)
+          fallbackResults.push({ id: file.id, status: 'validated', error: errorMessage })
+        } else {
+          await service.from('extraction_jobs').insert({ document_id: file.id, status: 'failed_retryable', model_version: MODEL, prompt_version: 'v1-fallback', schema_version: 'v1', error_message: errorMessage })
+          await service.from('documents').update({ processing_status: 'failed_retryable' }).eq('id', file.id)
+          fallbackResults.push({ id: file.id, status: 'failed_retryable', error: errorMessage })
+        }
       }
     }
     return json({ mode: 'normal_fallback', reason, results: fallbackResults })
