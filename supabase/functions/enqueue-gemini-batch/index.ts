@@ -130,7 +130,7 @@ Deno.serve(async (request) => {
   const geminiKey = Deno.env.get('GEMINI_API_KEY')
   if (!geminiKey) return json({ error: 'GEMINI_API_KEY is not configured' }, 503)
 
-  const uploadedFiles: Array<{ id: string; uri: string; mimeType: string }> = []
+  const uploadedFiles: Array<{ id: string; patient_id: string; uri: string; mimeType: string }> = []
   for (const document of documents) {
     const { data: signed } = await service.storage.from('medical-documents').createSignedUrl(document.storage_path, 3600)
     if (!signed?.signedUrl) continue
@@ -139,7 +139,7 @@ Deno.serve(async (request) => {
     const bytes = new Uint8Array(await source.arrayBuffer())
     const mimeType = document.original_filename.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg'
     const uploaded = await uploadGeminiFile(bytes, mimeType, document.original_filename, geminiKey)
-    uploadedFiles.push({ id: document.id, uri: uploaded.uri, mimeType })
+    uploadedFiles.push({ id: document.id, patient_id: document.patient_id, uri: uploaded.uri, mimeType })
   }
   if (!uploadedFiles.length) return json({ error: 'Could not upload documents to Gemini' }, 502)
 
