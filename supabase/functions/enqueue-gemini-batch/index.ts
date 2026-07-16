@@ -5,6 +5,7 @@ const GEMINI = 'https://generativelanguage.googleapis.com/v1beta'
 const GEMINI_UPLOAD = 'https://generativelanguage.googleapis.com/upload/v1beta/files'
 const MODEL = 'gemini-3.1-flash-lite'
 const PROMPT = 'Extract this historical medical document into JSON. Preserve exact dates, values, units, medicine instructions, uncertainty, and page references. Never infer missing facts. Distinguish prescribed, reported_taking, stopped, changed, completed, and unknown. Return JSON only.'
+const EMBEDDING_MODEL = 'gemini-embedding-2'
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: { ...cors, 'Content-Type': 'application/json' } })
@@ -49,6 +50,71 @@ async function runNormalFallback(fileUri: string, mimeType: string, apiKey: stri
   return { output, validated }
 }
 
+function asObject(value: unknown): Record<string, any> {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, any>
+  return {}
+}
+
+function asArray(value: unknown): any[] { return Array.isArray(value) ? value : [] }
+
+function dateOnly(value: unknown): string | null {
+  if (typeof value !== 'string' || !value) return null
+  const match = value.match(/^\d{4}-\d{2}-\d{2}/)
+  return match?.[0] ?? null
+}
+
+function dateTime(value: unknown): string | null {
+  if (typeof value !== 'string' || !value) return null
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString()
+}
+
+async function embedText(text: string, apiKey: string): Promise<number[]> {
+  const response = await fetch(`${GEMINI}/models/${EMBEDDING_MODEL}:embedContent?key=${apiKey}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: `models/${EMBEDDING_MODEL}`, content: { parts: [{ text }] }, output_dimensionality: 768 }),
+  })
+  if (!response.ok) throw new Error(`Embedding request failed: ${await response.text()}`)
+  const result = await response.json()
+  const values = result.embedding?.values
+  if (!Array.isArray(values) || values.length !== 768) throw new Error(`Unexpected embedding dimensions: ${values?.length ?? 0}`)
+  return values
+}
+
+async function indexExtraction(service: ReturnType<typeof createClient>, document: any, extracted: unknown, apiKey: string) {
+  const root = asObject(extracted)
+  const patient = asObject(root.patient)
+  const labs: any[] = []
+  for (const report of asArray(patient.laboratory_reports ?? root.laboratory_reports ?? root.lab_results)) {
+    for (const result of asArray(report.results ?? report.tests)) labs.push({
+      patient_id: document.patient_id, test_name_raw: String(result.test ?? result.name ?? 'Unknown test'), test_name_normalized: result.normalized_name ?? null,
+      value_text: result.value == null ? null : String(result.value), numeric_value: typeof result.value === 'number' ? result.value : Number(result.value) || null,
+      unit: result.unit ?? null, reference_range: result.reference_range ?? null, measured_at: dateTime(report.date ?? result.date), source_document_id: document.id, source_page: report.page ?? result.page ?? null, evidence: JSON.stringify(result), confidence: 0.85,
+    })
+  }
+  const vitals = asArray(patient.vitals ?? root.vitals).flatMap((v) => {
+    const value = typeof v.value === 'number' ? v.value : Number(v.value)
+    return Number.isFinite(value) ? [{ patient_id: document.patient_id, vital_type: String(v.type ?? v.name ?? 'Vital'), value, unit: v.unit ?? null, measured_at: dateTime(v.date ?? v.measured_at), source_document_id: document.id, source_page: v.page ?? null, evidence: JSON.stringify(v), confidence: 0.8 }] : []
+  })
+  const medications = asArray(patient.medications ?? root.medications ?? root.medicines).map((m) => ({ patient_id: document.patient_id, brand_name: m.brand_name ?? m.name ?? null, generic_name: m.generic_name ?? m.ingredient ?? null, strength: m.strength ?? m.dose ?? null, dosage_form: m.dosage_form ?? null, route: m.route ?? null, manufacturer: m.manufacturer ?? null, composition_status: m.composition_status ?? 'unknown', source_document_id: document.id, source_page: m.page ?? null, confidence: 0.8 }))
+  const events = [...asArray(patient.appointments ?? root.appointments).map((e) => ({ event_date: dateOnly(e.date), event_type: 'appointment', title: String(e.type ?? 'Appointment'), summary: e.reason ?? null, source_page: e.page ?? null, evidence: JSON.stringify(e) })), ...asArray(patient.procedures ?? root.procedures).map((e) => ({ event_date: dateOnly(e.date), event_type: 'procedure', title: String(e.name ?? 'Procedure'), summary: e.status ?? null, source_page: e.page ?? null, evidence: JSON.stringify(e) }))].map((e) => ({ ...e, patient_id: document.patient_id, source_document_id: document.id, confidence: 0.85 }))
+
+  for (const table of ['medical_events', 'medications', 'vitals', 'lab_results']) await service.from(table).delete().eq('source_document_id', document.id)
+  if (events.length) await service.from('medical_events').insert(events)
+  if (medications.length) await service.from('medications').insert(medications)
+  if (vitals.length) await service.from('vitals').insert(vitals)
+  if (labs.length) await service.from('lab_results').insert(labs)
+
+  const serialized = JSON.stringify(extracted)
+  const chunks = serialized.match(/.{1,5000}/gs) ?? [serialized]
+  await service.from('document_chunks').delete().eq('document_id', document.id)
+  for (let index = 0; index < chunks.length; index++) {
+    const embedding = await embedText(chunks[index], apiKey)
+    const { error } = await service.from('document_chunks').insert({ patient_id: document.patient_id, document_id: document.id, chunk_index: index, content: chunks[index], embedding: JSON.stringify(embedding), metadata: { source: 'gemini-embedding-2', model_version: EMBEDDING_MODEL } })
+    if (error) throw new Error(`Chunk insert failed: ${error.message}`)
+  }
+}
+
 Deno.serve(async (request) => {
   if (request.method === 'OPTIONS') return new Response('ok', { headers: cors })
   const service = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
@@ -87,9 +153,10 @@ Deno.serve(async (request) => {
     for (const file of uploadedFiles) {
       try {
         const fallback = await runNormalFallback(file.uri, file.mimeType, geminiKey)
+        await indexExtraction(service, file, fallback.validated, geminiKey)
         await service.from('extraction_jobs').insert({ document_id: file.id, status: 'validated', raw_output: fallback.output, validated_output: fallback.validated, model_version: MODEL, prompt_version: 'v1-fallback', schema_version: 'v1' })
-        await service.from('documents').update({ processing_status: 'validated', processed_at: new Date().toISOString() }).eq('id', file.id)
-        fallbackResults.push({ id: file.id, status: 'validated' })
+        await service.from('documents').update({ processing_status: 'indexed', processed_at: new Date().toISOString() }).eq('id', file.id)
+        fallbackResults.push({ id: file.id, status: 'indexed', embedding_model: EMBEDDING_MODEL })
       } catch (fallbackError) {
         await service.from('documents').update({ processing_status: 'failed_retryable' }).eq('id', file.id)
         fallbackResults.push({ id: file.id, status: 'failed_retryable', error: String(fallbackError) })

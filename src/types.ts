@@ -21,3 +21,23 @@ export type Vital = {
   unit: string | null
   source_page: number | null
 }
+
+export type LabResult = {
+  id: string
+  test_name_raw: string
+  value_text: string | null
+  numeric_value: number | null
+  unit: string | null
+  measured_at: string | null
+  source_page: number | null
+}
+
+export type Medication = {
+  id: string
+  brand_name: string | null
+  generic_name: string | null
+  strength: string | null
+  dosage_form: string | null
+  route: string | null
+  composition_status: string
+}
