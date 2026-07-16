@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Activity, AlertCircle, CheckCircle2, Clock3, FileText, HeartPulse, LoaderCircle, LogIn, Plus, Search, ShieldCheck, Upload, UserRound } from 'lucide-react'
+import { Activity, AlertCircle, CheckCircle2, Clock3, FileText, HeartPulse, LoaderCircle, LogIn, Plus, RefreshCw, Search, ShieldCheck, Trash2, Upload, UserRound } from 'lucide-react'
 import { supabase, supabaseConfigured } from './lib/supabase'
 import type { DocumentRecord, LabResult, Medication, PatientProfile, Vital } from './types'
 
@@ -24,6 +24,7 @@ function App() {
   const [uploadTotal, setUploadTotal] = useState(0)
   const [email, setEmail] = useState('')
   const [notice, setNotice] = useState('')
+  const [deletingDocumentId, setDeletingDocumentId] = useState<string | null>(null)
 
   function tabFromHash() {
     const hash = window.location.hash.replace('#', '')
@@ -110,6 +111,28 @@ function App() {
     await refreshPatientData(selectedPatient); event.target.value = ''
   }
 
+  async function deleteDocument(document: DocumentRecord) {
+    if (!supabase || deletingDocumentId) return
+    if (!window.confirm(`Delete “${document.original_filename}” and its extracted data? This cannot be undone.`)) return
+    setDeletingDocumentId(document.id)
+    const removed = await supabase.storage.from('medical-documents').remove([document.storage_path])
+    if (removed.error) { setNotice(`Could not delete the stored file: ${removed.error.message}`); setDeletingDocumentId(null); return }
+    const { error } = await supabase.rpc('delete_patient_document', { target_document: document.id })
+    setDeletingDocumentId(null)
+    if (error) setNotice(`Could not delete the document record: ${error.message}`)
+    else { setNotice('Document and extracted data deleted.'); await refreshPatientData(selectedPatient) }
+  }
+
+  async function retryDocument(document: DocumentRecord) {
+    if (!supabase || deletingDocumentId) return
+    setDeletingDocumentId(document.id)
+    const { error: updateError } = await supabase.from('documents').update({ processing_status: 'queued', processed_at: null }).eq('id', document.id)
+    if (!updateError) await supabase.functions.invoke('enqueue-gemini-batch')
+    setDeletingDocumentId(null)
+    setNotice(updateError ? `Could not retry processing: ${updateError.message}` : 'Processing restarted. The free tier may take a few minutes.')
+    await refreshPatientData(selectedPatient)
+  }
+
   function processingLabel(status: string) { return ({ queued: 'Queued', batch_submitted: 'Batch submitted', processing: 'Processing', validated: 'Extracted', indexed: 'Searchable', failed_retryable: 'Retrying', failed_permanent: 'Needs retry' } as Record<string, string>)[status] ?? status }
   function processingIcon(status: string) { if (status === 'indexed' || status === 'validated') return <CheckCircle2 size={13} />; if (status.includes('failed')) return <AlertCircle size={13} />; if (status === 'processing' || status === 'batch_submitted') return <LoaderCircle className="spin" size={13} />; return <Clock3 size={13} /> }
   const activePatient = useMemo(() => patients.find((p) => p.id === selectedPatient), [patients, selectedPatient])
@@ -117,7 +140,7 @@ function App() {
 
   if (!sessionEmail && supabaseConfigured) return <div className="auth-shell"><div className="auth-card"><div className="brand-mark"><HeartPulse size={22} /></div><p className="eyebrow">PRIVATE HEALTH ARCHIVE</p><h1>Keep the record together.</h1><p className="muted">A secure family workspace for documents, medicines, vitals, and timelines.</p><button className="primary full" onClick={() => setShowLogin(true)}><LogIn size={17} /> Sign in with email</button><p className="tiny">Each account only sees its own patient profiles.</p>{showLogin && <form className="login-form" onSubmit={sendMagicLink}><input type="email" required placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} /><button className="primary full" type="submit">Send secure link</button></form>}{notice && <p className="notice">{notice}</p>}</div></div>
 
-  const documentList = <div className="document-list">{documents.map((doc) => <div className="document-row" key={doc.id}><div className="file-icon"><FileText size={17} /></div><div className="document-name"><strong>{doc.original_filename}</strong><span>{doc.document_type ?? 'Awaiting classification'}</span></div><span className={`status ${doc.processing_status}`}>{processingIcon(doc.processing_status)} {processingLabel(doc.processing_status)}</span></div>)}</div>
+  const documentList = <div className="document-list">{documents.map((doc) => <div className="document-row" key={doc.id}><div className="file-icon"><FileText size={17} /></div><div className="document-name"><strong>{doc.original_filename}</strong><span>{doc.document_type ?? 'Awaiting classification'}</span></div><span className={`status ${doc.processing_status}`}>{processingIcon(doc.processing_status)} {processingLabel(doc.processing_status)}</span>{doc.processing_status !== 'indexed' && <button className="retry-button" onClick={() => retryDocument(doc)} disabled={deletingDocumentId === doc.id} aria-label="Retry processing" title="Retry processing"><RefreshCw size={14} /></button>}<button className="delete-button" onClick={() => deleteDocument(doc)} disabled={deletingDocumentId === doc.id} aria-label={`Delete ${doc.original_filename}`} title="Delete document">{deletingDocumentId === doc.id ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}</button></div>)}</div>
   const page = activeTab === 'Documents' ? <Page title="Document library" eyebrow="YOUR RECORDS"><div className="panel full-panel"><div className="panel-head"><div><p className="eyebrow">SOURCE FILES</p><h3>Every uploaded record</h3></div><span className="muted">{documents.length} file{documents.length === 1 ? '' : 's'}</span></div>{documents.length ? documentList : <Empty text="Upload a PDF or a clear photo of a medical page." />}</div></Page>
     : activeTab === 'Medicines' ? <Page title="Medicines" eyebrow="MEDICATION HISTORY"><div className="panel full-panel"><div className="panel-head"><div><p className="eyebrow">EXTRACTED MEDICINES</p><h3>Prescribed or mentioned</h3></div></div>{medicines.length ? medicines.map((med) => <div className="data-row" key={med.id}><strong>{med.brand_name || med.generic_name || 'Unnamed medicine'}</strong><span>{[med.generic_name, med.strength, med.dosage_form, med.route].filter(Boolean).join(' · ') || 'Details pending'}</span></div>) : <Empty text="Medicines will appear here when the extraction pipeline finds them." />}</div></Page>
     : activeTab === 'Vitals & labs' ? <Page title="Vitals & labs" eyebrow="STRUCTURED HISTORY"><div className="content-grid"><div className="panel"><div className="panel-head"><div><p className="eyebrow">VITALS</p><h3>Measurements</h3></div><strong>{vitals.length}</strong></div>{vitals.length ? vitals.map((v) => <div className="data-row" key={v.id}><strong>{v.vital_type}: {v.value} {v.unit ?? ''}</strong><span>{v.measured_at ? new Date(v.measured_at).toLocaleDateString() : 'Date not recorded'} · page {v.source_page ?? '—'}</span></div>) : <Empty text="No vitals extracted yet." />}</div><div className="panel"><div className="panel-head"><div><p className="eyebrow">LAB RESULTS</p><h3>Latest values</h3></div><strong>{labs.length}</strong></div>{labs.length ? labs.slice(0, 20).map((lab) => <div className="data-row" key={lab.id}><strong>{lab.test_name_raw}: {lab.value_text ?? lab.numeric_value ?? '—'} {lab.unit ?? ''}</strong><span>{lab.measured_at ? new Date(lab.measured_at).toLocaleDateString() : 'Date not recorded'} · page {lab.source_page ?? '—'}</span></div>) : <Empty text="Lab results will appear here after extraction." />}</div></div></Page>

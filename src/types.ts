@@ -8,6 +8,7 @@ export type DocumentRecord = {
   id: string
   patient_id: string
   original_filename: string
+  storage_path: string
   document_type: string | null
   processing_status: string
   created_at: string
