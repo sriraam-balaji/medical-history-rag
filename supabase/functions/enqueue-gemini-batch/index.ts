@@ -249,43 +249,168 @@ async function embedText(text: string, apiKey: string): Promise<{ values: number
 async function indexExtraction(service: ReturnType<typeof createClient>, document: any, extracted: unknown, apiKey: string) {
   const root = asObject(extracted)
   const patient = asObject(root.patient)
-  const documentType = String(root.document_type ?? root.document_category ?? 'Medical record').trim().slice(0, 120)
+  const provider = asObject(root.provider)
+  const documentType = String(root.document_type ?? root.document_category ?? 'Prescription / Medical record').trim().slice(0, 120)
+
+  // 1. Audit Log: Store raw canonical JSON extraction for auditability, versioning, and re-processing
+  await service.from('extraction_jobs').insert({
+    document_id: document.id,
+    status: 'completed',
+    prompt_version: 'v3-strict-canonical',
+    schema_version: 'v2',
+    raw_json: JSON.stringify(extracted),
+    error_message: null
+  }).catch(() => null)
+
+  // 2. Schema Validation & Normalization Layer
   const labs: any[] = []
-  for (const report of asArray(patient.laboratory_reports ?? root.laboratory_reports ?? root.lab_results)) {
-    for (const result of asArray(report.results ?? report.tests)) labs.push({
-      patient_id: document.patient_id, test_name_raw: String(result.test ?? result.name ?? 'Unknown test'), test_name_normalized: result.normalized_name ?? null,
-      value_text: result.value == null ? null : String(result.value), numeric_value: typeof result.value === 'number' ? result.value : Number(result.value) || null,
-      unit: result.unit ?? null, reference_range: result.reference_range ?? null, measured_at: dateTime(report.date ?? result.date), source_document_id: document.id, source_page: report.page ?? result.page ?? null, evidence: JSON.stringify(result), confidence: 0.85,
-    })
+  const labReports = asArray(patient.laboratory_reports ?? root.laboratory_reports ?? root.lab_results)
+  for (const report of labReports) {
+    const reportDate = dateTime(report.date ?? report.measured_at ?? root.date)
+    const reportPage = typeof report.page === 'number' ? report.page : 1
+    const results = asArray(report.results ?? report.tests ?? (report.test_name_raw ? [report] : []))
+    for (const result of results) {
+      const rawName = String(result.test_name_raw ?? result.test ?? result.name ?? '').trim()
+      if (!rawName) continue
+      labs.push({
+        patient_id: document.patient_id,
+        test_name_raw: rawName,
+        test_name_normalized: result.test_name_normalized ?? result.normalized_name ?? null,
+        value_text: result.value_text != null ? String(result.value_text) : (result.value != null ? String(result.value) : null),
+        numeric_value: typeof result.numeric_value === 'number' ? result.numeric_value : (typeof result.value === 'number' ? result.value : Number(result.value) || null),
+        unit: result.unit ?? null,
+        reference_range: result.reference_range ?? null,
+        measured_at: dateTime(result.measured_at ?? reportDate),
+        source_document_id: document.id,
+        source_page: result.page ?? reportPage,
+        evidence: JSON.stringify(result),
+        confidence: result.certainty === 'explicit' ? 0.95 : 0.85,
+      })
+    }
   }
+
   const vitals = asArray(patient.vitals ?? root.vitals).flatMap((v) => {
-    const value = typeof v.value === 'number' ? v.value : Number(v.value)
-    return Number.isFinite(value) ? [{ patient_id: document.patient_id, vital_type: String(v.type ?? v.name ?? 'Vital'), value, unit: v.unit ?? null, measured_at: dateTime(v.date ?? v.measured_at), source_document_id: document.id, source_page: v.page ?? null, evidence: JSON.stringify(v), confidence: 0.8 }] : []
+    const rawVal = v.numeric_value ?? v.value
+    const numVal = typeof rawVal === 'number' ? rawVal : Number(rawVal)
+    const type = String(v.vital_type ?? v.type ?? v.name ?? 'Vital').trim()
+    return type ? [{
+      patient_id: document.patient_id,
+      vital_type: type,
+      value: Number.isFinite(numVal) ? numVal : 0,
+      unit: v.unit ?? null,
+      measured_at: dateTime(v.measured_at ?? v.date),
+      source_document_id: document.id,
+      source_page: v.page ?? 1,
+      evidence: JSON.stringify(v),
+      confidence: v.certainty === 'explicit' ? 0.95 : 0.8,
+    }] : []
   })
+
   const medicationSource = asArray(patient.medications ?? root.medications ?? root.medicines ?? patient.prescriptions ?? root.prescriptions)
-  const medications = medicationSource.map((m) => ({ patient_id: document.patient_id, brand_name: m.brand_name ?? m.medicine ?? m.name ?? null, generic_name: m.generic_name ?? m.ingredient ?? null, strength: m.strength ?? m.dose ?? null, dosage_form: m.dosage_form ?? null, route: m.route ?? null, manufacturer: m.manufacturer ?? null, composition_status: m.composition_status ?? 'unknown', source_document_id: document.id, source_page: m.page ?? null, confidence: typeof m.confidence === 'number' ? m.confidence : 0.8 }))
+  const medications = medicationSource.flatMap((m) => {
+    const brand = m.brand_name ?? m.medicine ?? m.name ?? null
+    const generic = m.generic_name ?? m.ingredient ?? null
+    if (!brand && !generic) return []
+    return [{
+      patient_id: document.patient_id,
+      brand_name: brand,
+      generic_name: generic,
+      strength: m.strength ?? m.dose ?? null,
+      dosage_form: m.dosage_form ?? null,
+      route: m.route ?? null,
+      manufacturer: m.manufacturer ?? null,
+      composition_status: m.status ?? m.composition_status ?? 'prescribed',
+      source_document_id: document.id,
+      source_page: m.page ?? 1,
+      confidence: m.certainty === 'explicit' ? 0.95 : 0.85,
+    }]
+  })
+
   const visits = asArray(patient.visits ?? root.visits ?? patient.appointments ?? root.appointments)
+  const eventsSource = asArray(patient.medical_events ?? root.medical_events ?? visits)
   const instructions = asArray(patient.care_instructions ?? root.care_instructions ?? root.instructions ?? root.recommendations)
-  const events = [...visits.map((e) => ({ event_date: dateOnly(e.date ?? e.visit_date), event_type: 'appointment', title: String(e.type ?? e.visit_type ?? 'Appointment'), summary: e.reason ?? e.visit_reason ?? null, doctor_name: e.doctor_name ?? e.doctor ?? e.physician ?? null, specialty: e.specialty ?? e.department ?? null, facility: e.facility ?? e.hospital ?? e.clinic ?? null, visit_reason: e.reason ?? e.visit_reason ?? null, source_page: e.page ?? null, evidence: JSON.stringify(e) })), ...asArray(patient.procedures ?? root.procedures).map((e) => ({ event_date: dateOnly(e.date), event_type: 'procedure', title: String(e.name ?? 'Procedure'), summary: e.status ?? null, doctor_name: e.doctor_name ?? e.doctor ?? null, specialty: e.specialty ?? null, facility: e.facility ?? e.hospital ?? null, visit_reason: null, source_page: e.page ?? null, evidence: JSON.stringify(e) })), ...instructions.map((e) => ({ event_date: dateOnly(e.date), event_type: 'care_instruction', title: String(e.instruction ?? e.text ?? e.recommendation ?? 'Care instruction'), summary: e.category ?? null, doctor_name: null, specialty: null, facility: null, visit_reason: null, source_page: e.page ?? null, evidence: JSON.stringify(e) }))].map((e) => ({ ...e, patient_id: document.patient_id, source_document_id: document.id, confidence: 0.85 }))
+  const events = [
+    ...eventsSource.map((e) => ({
+      event_date: dateOnly(e.event_date ?? e.date ?? e.visit_date),
+      event_type: e.event_type ?? 'appointment',
+      title: String(e.title ?? e.type ?? e.visit_type ?? 'Medical Visit'),
+      summary: e.summary ?? e.reason ?? e.visit_reason ?? null,
+      doctor_name: e.doctor_name ?? provider.doctor_name ?? root.doctor_name ?? null,
+      specialty: e.specialty ?? provider.specialty ?? root.specialty ?? null,
+      facility: e.facility ?? provider.facility_name ?? root.facility ?? null,
+      visit_reason: e.visit_reason ?? e.reason ?? null,
+      source_page: e.page ?? 1,
+      evidence: JSON.stringify(e),
+      confidence: 0.9,
+    })),
+    ...instructions.map((e) => ({
+      event_date: dateOnly(e.date),
+      event_type: 'care_instruction',
+      title: String(e.instruction ?? e.text ?? e.recommendation ?? 'Care instruction'),
+      summary: e.category ?? null,
+      doctor_name: provider.doctor_name ?? null,
+      specialty: null,
+      facility: provider.facility_name ?? null,
+      visit_reason: null,
+      source_page: e.page ?? 1,
+      evidence: JSON.stringify(e),
+      confidence: 0.85,
+    }))
+  ].map((e) => ({ ...e, patient_id: document.patient_id, source_document_id: document.id }))
 
   const consultationDate = dateOnly(root.date ?? root.visit_date ?? root.consultation_date)
-  const consultationFacility = root.facility ?? root.hospital ?? root.clinic ?? null
-  const consultationTitle = String(root.document_type ?? root.document_category ?? 'Medical consultation')
-  if (consultationDate || consultationFacility || visits.length === 0 && (root.diagnoses || root.assessment)) events.unshift({ patient_id: document.patient_id, event_date: consultationDate, event_type: 'consultation', title: consultationTitle, summary: asArray(root.diagnoses ?? root.assessment).join(', ') || null, doctor_name: root.doctor_name ?? root.doctor ?? root.physician ?? null, specialty: root.specialty ?? root.department ?? null, facility: consultationFacility, visit_reason: null, source_document_id: document.id, source_page: root.page ?? 1, evidence: JSON.stringify({ date: root.date, facility: consultationFacility, diagnoses: root.diagnoses ?? root.assessment }), confidence: 0.8 })
+  const consultationFacility = provider.facility_name ?? root.facility ?? root.hospital ?? root.clinic ?? null
+  const consultationDoctor = provider.doctor_name ?? root.doctor_name ?? root.doctor ?? null
+  if (events.length === 0 && (consultationDate || consultationFacility || consultationDoctor || root.diagnoses)) {
+    events.unshift({
+      patient_id: document.patient_id,
+      event_date: consultationDate,
+      event_type: 'consultation',
+      title: `${documentType} consultation`,
+      summary: asArray(root.diagnoses).map((d: any) => typeof d === 'string' ? d : d.raw_text).filter(Boolean).join(', ') || null,
+      doctor_name: consultationDoctor,
+      specialty: provider.specialty ?? root.specialty ?? null,
+      facility: consultationFacility,
+      visit_reason: null,
+      source_document_id: document.id,
+      source_page: 1,
+      evidence: JSON.stringify({ provider, date: consultationDate, diagnoses: root.diagnoses }),
+      confidence: 0.85,
+    })
+  }
 
-  for (const table of ['medical_events', 'medications', 'vitals', 'lab_results']) requireDb(await service.from(table).delete().eq('source_document_id', document.id), `Clear ${table}`)
+  // 3. Delete existing records for this document to ensure clean idempotent overwrite
+  for (const table of ['medical_events', 'medications', 'vitals', 'lab_results']) {
+    requireDb(await service.from(table).delete().eq('source_document_id', document.id), `Clear ${table}`)
+  }
   if (events.length) requireDb(await service.from('medical_events').insert(events), 'Insert medical events')
   if (medications.length) requireDb(await service.from('medications').insert(medications), 'Insert medications')
   if (vitals.length) requireDb(await service.from('vitals').insert(vitals), 'Insert vitals')
   if (labs.length) requireDb(await service.from('lab_results').insert(labs), 'Insert lab results')
 
+  // 4. Chunk & Embed Canonical JSON for Vector RAG Search
   const serialized = JSON.stringify(extracted)
   const chunks = serialized.match(/.{1,5000}/gs) ?? [serialized]
   requireDb(await service.from('document_chunks').delete().eq('document_id', document.id), 'Clear document chunks')
   for (let index = 0; index < chunks.length; index++) {
     const { values: embedding, model: embeddingModel } = await embedText(chunks[index], apiKey)
-    requireDb(await service.from('document_chunks').insert({ patient_id: document.patient_id, document_id: document.id, chunk_index: index, content: chunks[index], embedding: `[${embedding.join(',')}]`, metadata: { source: embeddingModel, model_version: embeddingModel } }), 'Insert document chunk')
+    requireDb(await service.from('document_chunks').insert({
+      patient_id: document.patient_id,
+      document_id: document.id,
+      chunk_index: index,
+      content: chunks[index],
+      embedding: `[${embedding.join(',')}]`,
+      metadata: { source: embeddingModel, model_version: embeddingModel, prompt_version: 'v3-strict-canonical' }
+    }), 'Insert document chunk')
   }
+
+  // 5. Update Document Status to 'indexed' with Classification & Type Metadata
+  await service.from('documents').update({
+    processing_status: 'indexed',
+    content_classification: 'medical_document',
+    document_type: documentType,
+    processed_at: new Date().toISOString()
+  }).eq('id', document.id)
 }
 
 Deno.serve(async (request) => {
