@@ -158,10 +158,24 @@ function App() {
   }
 
 async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentType: string; name: string }> {
-  const isPdf = file.name.toLowerCase().endsWith('.pdf') || file.type === 'application/pdf'
+  const lowerName = file.name.toLowerCase()
+  const isPdf = lowerName.endsWith('.pdf') || file.type === 'application/pdf' || file.type === 'application/x-pdf' || file.type.includes('pdf')
+  
   if (isPdf) {
-    return { blob: file, contentType: 'application/pdf', name: file.name }
+    let name = file.name
+    if (!name.toLowerCase().endsWith('.pdf')) {
+      name = `${name}.pdf`
+    }
+    try {
+      const buffer = await file.arrayBuffer()
+      const blob = new Blob([buffer], { type: 'application/pdf' })
+      return { blob, contentType: 'application/pdf', name }
+    } catch (err) {
+      console.warn('PDF arrayBuffer read fallback:', err)
+      return { blob: file, contentType: 'application/pdf', name }
+    }
   }
+
   const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|webp|heic)$/i.test(file.name)
   if (isImage) {
     try {
@@ -193,17 +207,29 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
       console.warn('Image optimization fallback:', err)
     }
   }
-  const contentType = file.type || (file.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg')
-  return { blob: file, contentType, name: file.name }
+  
+  try {
+    const buffer = await file.arrayBuffer()
+    const contentType = file.type || (file.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg')
+    return { blob: new Blob([buffer], { type: contentType }), contentType, name: file.name }
+  } catch {
+    return { blob: file, contentType: file.type || 'image/jpeg', name: file.name }
+  }
 }
 
   async function uploadFiles(event: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files ?? [])
     event.target.value = ''
     if (!supabase || !selectedPatient || !files.length || uploadingFiles) return
-    const allowed = files.filter((file) => file.type === 'application/pdf' || file.type.startsWith('image/') || /\.(pdf|png|jpe?g|webp|heic)$/i.test(file.name))
+    const allowed = files.filter((file) =>
+      file.type === 'application/pdf' ||
+      file.type === 'application/x-pdf' ||
+      file.type.includes('pdf') ||
+      file.type.startsWith('image/') ||
+      /\.(pdf|png|jpe?g|webp|heic)$/i.test(file.name)
+    )
     if (allowed.length !== files.length) { setNotice('Only PDF files and images (JPG, PNG, WEBP, or HEIC) can be uploaded.'); return }
-    setUploadingFiles(true); setUploadProgress(0); setUploadTotal(files.length); setNotice(`Selected ${files.length} file${files.length === 1 ? '' : 's'}. Optimizing & uploading…`)
+    setUploadingFiles(true); setUploadProgress(0); setUploadTotal(files.length); setNotice(`Selected ${files.length} file${files.length === 1 ? '' : 's'}. Processing & uploading…`)
     let done = 0
     let uploadedCount = 0
     const uploadErrors: string[] = []
@@ -220,7 +246,12 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
             contentType: prepared.contentType,
             cacheControl: '3600',
           })
-          upload = { error: result.error ? { message: result.error.message } : null }
+          if (result.error) {
+            console.error('Supabase Storage Error:', result.error)
+            upload = { error: { message: result.error.message } }
+          } else {
+            upload = { error: null }
+          }
         } catch (err: any) {
           console.error('Fetch exception during upload:', err)
           upload = { error: { message: err?.message || 'Network fetch error' } }
