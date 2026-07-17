@@ -95,24 +95,7 @@ function App() {
     if (docs.error) {
       setNotice(`Could not refresh the document library: ${docs.error.message}. Retrying automatically…`)
     } else {
-      const fetchedDocs = (docs.data ?? []) as DocumentRecord[]
-      const rejected = fetchedDocs.filter((d) => d.processing_status === 'failed_permanent' || d.content_classification === 'non_medical')
-      if (rejected.length) {
-        for (const doc of rejected) {
-          doc.processing_status = 'indexed'
-          doc.content_classification = 'medical_document'
-          doc.document_type = doc.document_type || 'Prescription / Medical record'
-          doc.rejection_reason = null
-          await supabase.from('documents').update({
-            processing_status: 'indexed',
-            content_classification: 'medical_document',
-            document_type: doc.document_type,
-            rejection_reason: null,
-            processed_at: new Date().toISOString()
-          }).eq('id', doc.id)
-        }
-      }
-      setDocuments(fetchedDocs)
+      setDocuments((docs.data ?? []) as DocumentRecord[])
     }
     if (!vitalRows.error) setVitals((vitalRows.data ?? []) as Vital[])
     if (!labRows.error) setLabs((labRows.data ?? []) as LabResult[])
@@ -385,21 +368,26 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
     if (!supabase || deletingDocumentId) return
     setDeletingDocumentId(document.id)
     const { error: updateError } = await supabase.from('documents').update({
-      processing_status: 'indexed',
+      processing_status: 'queued',
       content_classification: 'medical_document',
-      document_type: document.document_type || 'Prescription / Medical record',
       rejection_reason: null,
-      processed_at: new Date().toISOString(),
+      processed_at: null,
       retry_count: (document.retry_count ?? 0) + 1
     }).eq('id', document.id)
 
-    setDeletingDocumentId(null)
-
     if (updateError) {
-      setNotice(`Could not update document: ${updateError.message}`)
+      setDeletingDocumentId(null)
+      setNotice(`Could not queue document: ${updateError.message}`)
+      return
+    }
+
+    setNotice('Extraction in progress… Parsing medicines, vitals, and visits.')
+    const { data: processingResult, error: functionError } = await supabase.functions.invoke('enqueue-gemini-batch').catch((err) => ({ data: null, error: err }))
+    setDeletingDocumentId(null)
+    if (functionError) {
+      setNotice(`Backend extraction trigger notice: ${functionError.message}. Check library status in a few seconds.`)
     } else {
-      setNotice('Document restored as Searchable in your library.')
-      supabase.functions.invoke('enqueue-gemini-batch').catch(() => null)
+      setNotice('Extraction completed! Check Medicines, Vitals & Labs, and Care Timeline.')
     }
     await refreshPatientData(selectedPatient)
   }
