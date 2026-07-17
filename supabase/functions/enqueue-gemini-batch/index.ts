@@ -3,10 +3,10 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type' }
 const GEMINI = 'https://generativelanguage.googleapis.com/v1beta'
 const GEMINI_UPLOAD = 'https://generativelanguage.googleapis.com/upload/v1beta/files'
-const MODEL = 'gemini-2.5-flash'
+const MODEL = 'gemini-3.1-flash-lite'
 const PROMPT = `Classify and extract this medical document into JSON. This archive accepts all health and medical records including doctor prescriptions (handwritten or printed), clinic letterheads (e.g. Gandhi Clinic, Gericare Hospital), Rx slips, laboratory reports, blood test results (FBS, PPBS, HbA1c, lipid profile), imaging reports, discharge summaries, and medical consultation notes. Set content_classification to "medical_document". Always classify any clinic letterhead, doctor prescription, Rx symbol, or health note as "medical_document" (do not classify clinical pages as non_medical or uncertain). For document_type, specify a concise category such as prescription, laboratory report, consultation note, or clinical record. Extract exact dates, patient names (e.g. Mr Balaji Ramasamy), doctor names (e.g. Dr R Indhumathi), facility names (e.g. Gandhi Clinic, Gericare Hospital), medications (e.g. Istamet, Udapa, Lipaglyn, Telma, Roswas, Azee, Dolo, Flomist), lab test values (FBS, PPBS, HbA1c), reference ranges, visit reasons, and page numbers. Return JSON only.`
-const EMBEDDING_MODELS = ['text-embedding-004', 'embedding-001']
-const FLASH_MODELS = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash']
+const EMBEDDING_MODELS = ['gemini-embedding-2', 'text-embedding-004', 'embedding-001']
+const FLASH_MODELS = ['gemini-3.1-flash-lite', 'gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash']
 const ENABLE_BATCH_API = Deno.env.get('ENABLE_GEMINI_BATCH') === 'true'
 
 function json(data: unknown, status = 200) {

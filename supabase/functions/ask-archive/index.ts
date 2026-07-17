@@ -2,8 +2,8 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
 const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type' }
 const API = 'https://generativelanguage.googleapis.com/v1beta'
-const EMBEDDING_MODELS = ['text-embedding-004', 'embedding-001']
-const ANSWER_MODELS = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash']
+const EMBEDDING_MODELS = ['gemini-embedding-2', 'text-embedding-004', 'embedding-001']
+const ANSWER_MODELS = ['gemini-3.1-flash-lite', 'gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash']
 
 function json(data: unknown, status = 200) { return new Response(JSON.stringify(data), { status, headers: { ...cors, 'Content-Type': 'application/json' } }) }
 
