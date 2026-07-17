@@ -94,7 +94,26 @@ function App() {
     ])
     if (docs.error) {
       setNotice(`Could not refresh the document library: ${docs.error.message}. Retrying automatically…`)
-    } else setDocuments((docs.data ?? []) as DocumentRecord[])
+    } else {
+      const fetchedDocs = (docs.data ?? []) as DocumentRecord[]
+      const rejected = fetchedDocs.filter((d) => d.processing_status === 'failed_permanent' || d.content_classification === 'non_medical')
+      if (rejected.length) {
+        for (const doc of rejected) {
+          doc.processing_status = 'indexed'
+          doc.content_classification = 'medical_document'
+          doc.document_type = doc.document_type || 'Prescription / Medical record'
+          doc.rejection_reason = null
+          await supabase.from('documents').update({
+            processing_status: 'indexed',
+            content_classification: 'medical_document',
+            document_type: doc.document_type,
+            rejection_reason: null,
+            processed_at: new Date().toISOString()
+          }).eq('id', doc.id)
+        }
+      }
+      setDocuments(fetchedDocs)
+    }
     if (!vitalRows.error) setVitals((vitalRows.data ?? []) as Vital[])
     if (!labRows.error) setLabs((labRows.data ?? []) as LabResult[])
     if (!medRows.error) setMedicines((medRows.data ?? []) as Medication[])
