@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Activity, AlertCircle, CheckCircle2, Clock3, FileText, HeartPulse, LoaderCircle, LogIn, Menu, Plus, RefreshCw, Search, ShieldCheck, Trash2, Upload, UserRound } from 'lucide-react'
+import { Activity, AlertCircle, CheckCircle2, Clock3, FileText, HeartPulse, LoaderCircle, LogIn, Menu, Pencil, Plus, RefreshCw, Search, ShieldCheck, Trash2, Upload, UserRound } from 'lucide-react'
 import { supabase, supabaseConfigured } from './lib/supabase'
 import type { DocumentRecord, LabResult, MedicalEvent, Medication, PatientProfile, Vital } from './types'
 
@@ -407,13 +407,14 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
     else { setCitations(data?.citations ?? []); setAnswer(data?.answer ?? 'No answer returned.'); setNotice('Answer generated from indexed records.') }
   }
 
-  async function openSource(documentId: string) {
+  async function openSource(documentId: string, page?: number | null) {
     if (!supabase) return
     const document = documents.find((item) => item.id === documentId)
     if (!document) { setNotice('The original source is not available in this profile.'); return }
     const { data, error } = await supabase.storage.from('medical-documents').createSignedUrl(document.storage_path, 600)
     if (error || !data?.signedUrl) { setNotice(`Could not open source: ${error?.message ?? 'source unavailable'}`); return }
-    window.open(data.signedUrl, '_blank', 'noopener,noreferrer')
+    const pageHash = page && page > 0 ? `#page=${page}` : ''
+    window.open(data.signedUrl + pageHash, '_blank', 'noopener,noreferrer')
   }
 
   function processingLabel(status: string) { return ({ queued: 'Processing in queue', batch_submitted: 'Processing', processing: 'Processing', validated: 'Extracted', indexed: 'Searchable', failed_retryable: 'Processing', failed_permanent: 'Processing in queue' } as Record<string, string>)[status] ?? 'Processing' }
@@ -424,15 +425,40 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
   if (recoveryMode && supabase) return <PasswordRecoveryModal newPassword={newPassword} confirmPassword={confirmPassword} setNewPassword={setNewPassword} setConfirmPassword={setConfirmPassword} authBusy={authBusy} notice={notice} onSubmit={updatePassword} />
   if (!sessionEmail) return <div className="auth-shell"><div className="auth-card"><div className="brand-mark"><HeartPulse size={22} /></div><p className="eyebrow">PRIVATE HEALTH ARCHIVE</p><h1>Keep the record together.</h1><p className="muted">A secure family workspace for documents, medicines, vitals, and timelines.</p>{!showLogin && <button className="primary full" onClick={() => setShowLogin(true)}><LogIn size={17} /> Sign in or create account</button>}<p className="tiny">Each account only sees its own patient profiles.</p>{showLogin && <form className="login-form" onSubmit={submitAuth}><div className="auth-mode"><button type="button" className={authMode === 'signin' ? 'selected' : ''} onClick={() => { setAuthMode('signin'); setNotice('') }}>Sign in</button><button type="button" className={authMode === 'signup' ? 'selected' : ''} onClick={() => { setAuthMode('signup'); setNotice('') }}>Create account</button></div><label htmlFor="auth-email">Email address</label><input id="auth-email" type="email" required autoComplete="email" placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} /><label htmlFor="auth-password">Password</label><input id="auth-password" type="password" required minLength={6} autoComplete={authMode === 'signup' ? 'new-password' : 'current-password'} placeholder="At least 6 characters" value={password} onChange={(e) => setPassword(e.target.value)} /><button className="primary full" type="submit" disabled={authBusy}>{authBusy ? 'Please wait…' : authMode === 'signup' ? 'Create account' : 'Sign in'}</button><div className="auth-links"><button type="button" className="text-button" onClick={() => { setAuthMode(authMode === 'signup' ? 'signin' : 'signup'); setNotice('') }}>{authMode === 'signup' ? 'Already have an account? Sign in' : 'New here? Create an account'}</button>{authMode === 'signin' && <button type="button" className="text-button" onClick={resetPassword} disabled={authBusy}>Forgot password?</button>}</div></form>}{notice && <p className="notice">{notice}</p>}</div></div>
 
+  async function updateMedication(med: Medication, brand: string, generic: string, strength: string, form: string) {
+    if (!supabase) return
+    const { error } = await supabase.from('medications').update({
+      brand_name: brand.trim() || null,
+      generic_name: generic.trim() || null,
+      strength: strength.trim() || null,
+      dosage_form: form.trim() || null,
+    }).eq('id', med.id)
+    if (error) setNotice(`Could not update medicine: ${error.message}`)
+    else {
+      setNotice('Medicine details updated.')
+      await refreshPatientData(selectedPatient)
+    }
+  }
+
+  async function deleteMedication(id: string) {
+    if (!supabase) return
+    const { error } = await supabase.from('medications').delete().eq('id', id)
+    if (error) setNotice(`Could not delete medicine: ${error.message}`)
+    else {
+      setNotice('Medicine deleted.')
+      await refreshPatientData(selectedPatient)
+    }
+  }
+
   const documentList = <div className="document-list">{documents.map((doc) => <div className="document-row" key={doc.id}><div className="file-icon"><FileText size={17} /></div><div className="document-name"><strong>{doc.original_filename}</strong><span>{doc.document_type || (doc.processing_status === 'indexed' ? 'Prescription / Medical record' : 'Processing document')}</span></div><span className={`status ${doc.processing_status}`}>{processingIcon(doc.processing_status)} {processingLabel(doc.processing_status)}</span>{(doc.processing_status !== 'indexed') && (doc.retry_count ?? 0) < 1 && <button className="retry-button" onClick={() => retryDocument(doc)} disabled={deletingDocumentId === doc.id} aria-label="Retry processing" title="Retry processing"><RefreshCw size={14} /></button>}<button className="delete-button" onClick={() => deleteDocument(doc)} disabled={deletingDocumentId === doc.id} aria-label={`Delete ${doc.original_filename}`} title="Delete document">{deletingDocumentId === doc.id ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}</button></div>)}</div>
   const legacyPage = activeTab === 'Documents' ? <Page title="Document library" eyebrow="YOUR RECORDS"><div className="panel full-panel"><div className="panel-head"><div><p className="eyebrow">SOURCE FILES</p><h3>Every uploaded record</h3></div><span className="muted">{documents.length} file{documents.length === 1 ? '' : 's'}</span></div>{documents.length ? documentList : <Empty text="Upload a PDF or a clear photo of a medical page." />}</div></Page>
-    : activeTab === 'Medicines' ? <Page title="Medicines" eyebrow="MEDICATION HISTORY"><div className="panel full-panel"><div className="panel-head"><div><p className="eyebrow">EXTRACTED MEDICINES</p><h3>Prescribed or mentioned</h3></div></div>{medicines.length ? medicines.map((med) => <div className="data-row" key={med.id}><strong>{med.brand_name || med.generic_name || 'Unnamed medicine'}</strong><span>{[med.generic_name, med.strength, med.dosage_form, med.route].filter(Boolean).join(' · ') || 'Details pending'}</span></div>) : <Empty text="Medicines will appear here when the extraction pipeline finds them." />}</div></Page>
+    : activeTab === 'Medicines' ? <MedicinesPage medicines={medicines} onEdit={updateMedication} onDelete={deleteMedication} />
     : activeTab === 'Doctors & visits' ? <VisitPage events={events} />
-    : activeTab === 'Vitals & labs' ? <Page title="Vitals & labs" eyebrow="STRUCTURED HISTORY"><div className="content-grid"><div className="panel"><div className="panel-head"><div><p className="eyebrow">VITALS</p><h3>Measurements</h3></div><strong>{vitals.length}</strong></div>{vitals.length ? vitals.map((v) => <div className="data-row" key={v.id}><strong>{v.vital_type}: {v.value} {v.unit ?? ''}</strong><span>{v.measured_at ? new Date(v.measured_at).toLocaleDateString() : 'Date not recorded'} · page {v.source_page ?? '—'}</span></div>) : <Empty text="No vitals extracted yet." />}</div><div className="panel"><div className="panel-head"><div><p className="eyebrow">LAB RESULTS</p><h3>Latest values</h3></div><strong>{labs.length}</strong></div>{labs.length ? labs.slice(0, 20).map((lab) => <div className="data-row" key={lab.id}><strong>{lab.test_name_raw}: {lab.value_text ?? lab.numeric_value ?? '—'} {lab.unit ?? ''}</strong><span>{lab.measured_at ? new Date(lab.measured_at).toLocaleDateString() : 'Date not recorded'} · page {lab.source_page ?? '—'}</span></div>) : <Empty text="Lab results will appear here after extraction." />}</div></div></Page>
+    : activeTab === 'Vitals & labs' ? <Page title="Vitals & labs" eyebrow="STRUCTURED HISTORY"><div className="content-grid"><div className="panel"><div className="panel-head"><div><p className="eyebrow">VITALS</p><h3>Measurements</h3></div><strong>{vitals.length}</strong></div>{vitals.length ? vitals.map((v) => <div className="data-row" key={v.id}><strong>{v.vital_type}: {v.value} {v.unit ?? ''}</strong><span>{v.measured_at ? new Date(v.measured_at).toLocaleDateString() : 'Date not recorded'} · page {v.source_page ?? '—'}</span></div>) : <Empty text="No vitals extracted yet." />}</div><div className="panel"><div className="panel-head"><div><p className="eyebrow">LAB RESULTS</p><h3>Latest values</h3></div><strong>{labs.length}</strong></div>{labs.length ? labs.slice(0, 20).map((lab) => <div className="data-row" key={lab.id}><strong>{lab.test_name_raw}: {lab.value_text ?? lab.numeric_value ?? '—'} {lab.unit ?? ''}</strong><span>{lab.measured_at ? new Date(lab.measured_at).toLocaleDateString() : 'Date not recorded'} · page {lab.source_page ?? '—'}</span></div>) : <Empty text="No blood test reports found in uploaded documents. Medicines, clinic visits & prescriptions captured." />}</div></div></Page>
     : activeTab === 'Ask the archive' ? <Page title="Ask the archive" eyebrow="CITED SEARCH"><div className="panel full-panel ask-panel"><Search size={25} /><h3>Search across this patient’s records</h3><p className="muted">Answers use only indexed records and include source references. This is an archive search, not a diagnosis.</p><form className="ask-placeholder" onSubmit={askArchive}><input value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="e.g. What lab values changed over time?" disabled={asking} /><button className="primary" type="submit" disabled={asking || !question.trim()}>{asking ? 'Searching…' : 'Search archive'}</button></form>{answer && <div className="answer-box"><strong>Archive answer</strong><p>{answer}</p></div>}</div></Page>
     : <Overview patient={activePatient} documents={documents} vitals={vitals} events={events} processingLabel={processingLabel} processingIcon={processingIcon} navigate={navigate} />
 
-  const pageContent = activeTab === 'Vitals & labs' ? <VitalsPage labs={labs} vitals={vitals} patient={activePatient} /> : activeTab === 'Ask the archive' ? <AskArchivePage question={question} setQuestion={setQuestion} asking={asking} answer={answer} citations={citations} onAsk={askArchive} onOpenSource={openSource} /> : legacyPage
+  const pageContent = activeTab === 'Vitals & labs' ? <VitalsPage labs={labs} vitals={vitals} patient={activePatient} /> : activeTab === 'Ask the archive' ? <AskArchivePage question={question} setQuestion={setQuestion} asking={asking} answer={answer} citations={citations} documents={documents} onAsk={askArchive} onOpenSource={openSource} /> : legacyPage
   const page = <><button className="mobile-menu-button" onClick={() => setMobileSidebarOpen(true)} aria-label="Open navigation"><Menu size={19} /> <span>Menu</span></button>{mobileSidebarOpen && <button className="mobile-sidebar-backdrop" onClick={() => setMobileSidebarOpen(false)} aria-label="Close navigation" />}{pageContent}</>
 
   return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark"><HeartPulse size={19} /></div><div><strong>Care Archive</strong><span>family health records</span></div></div><div className="side-section"><p className="side-label">WORKSPACE</p>{tabs.map((tab) => <button className={activeTab === tab ? 'side-link active' : 'side-link'} key={tab} onClick={() => navigate(tab)}>{tab === 'Documents' ? <FileText size={16} /> : tab === 'Vitals & labs' ? <Activity size={16} /> : tab === 'Ask the archive' ? <Search size={16} /> : <HeartPulse size={16} />}{tab}</button>)}</div><div className="side-bottom"><div className="privacy"><ShieldCheck size={17} /><span><strong>Private by default</strong><small>Source pages stay attached to every fact.</small></span></div>{sessionEmail && <button className="text-button" onClick={() => supabase?.auth.signOut()}>Sign out</button>}</div></aside><main className="main"><header className="topbar"><div><p className="eyebrow">YOUR ARCHIVE</p><h2>{activeTab}</h2></div><div className="top-actions">{sessionEmail && <span className="account"><UserRound size={15} /> {sessionEmail}</span>}<label className={uploadingFiles ? 'upload-button disabled' : 'upload-button'}><Upload size={16} /> {uploadingFiles ? `Uploading ${uploadProgress}/${uploadTotal}` : 'Upload files'}<input type="file" multiple accept="application/pdf,image/*" onChange={uploadFiles} disabled={uploadingFiles} /></label></div></header><section className="patient-bar"><div><span className="field-label">PATIENT PROFILE</span><select value={selectedPatient} onChange={(e) => setSelectedPatient(e.target.value)}>{displayPatients.map((patient) => <option key={patient.id} value={patient.id}>{patient.display_name}</option>)}</select></div><button className="secondary" onClick={() => { setPatientName(''); setPatientDob(''); setPatientSex(''); setShowProfileForm(true) }} disabled={!supabase}><Plus size={16} /> New profile</button></section>{notice && <div className="notice banner">{notice}</div>}{page}</main>{showProfileForm && supabase && <div className="modal-backdrop"><section className="profile-modal" role="dialog" aria-modal="true"><div className="modal-icon"><UserRound size={20} /></div><p className="eyebrow">WELCOME TO CARE ARCHIVE</p><h2>Who are these records for?</h2><p className="muted">Optional demographics enable more relevant reference bands.</p><form onSubmit={createPatient}><label className="modal-label" htmlFor="patient-name">Patient name</label><input id="patient-name" autoFocus required placeholder="e.g. Mom, Dad, or Priya" value={patientName} onChange={(e) => setPatientName(e.target.value)} /><label className="modal-label" htmlFor="patient-dob">Date of birth (optional)</label><input id="patient-dob" type="date" value={patientDob} onChange={(e) => setPatientDob(e.target.value)} /><label className="modal-label" htmlFor="patient-sex">Sex for reference ranges (optional)</label><select id="patient-sex" value={patientSex} onChange={(e) => setPatientSex(e.target.value)}><option value="">Prefer not to say</option><option value="female">Female</option><option value="male">Male</option><option value="intersex">Intersex</option></select><div className="modal-actions">{patients.length > 0 && <button type="button" className="secondary" onClick={() => setShowProfileForm(false)}>Cancel</button>}<button type="submit" className="primary" disabled={creatingPatient}>{creatingPatient ? 'Creating…' : 'Create profile'}</button></div></form></section></div>}</div>
@@ -449,6 +475,68 @@ function VisitPage({ events }: { events: MedicalEvent[] }) {
   for (const visit of visits) { const name = visit.doctor_name || visit.facility || 'Doctor not recorded'; byDoctor.set(name, (byDoctor.get(name) ?? 0) + 1) }
   return <Page title="Doctors & visits" eyebrow="CARE TIMELINE"><div className="content-grid"><section className="panel"><div className="panel-head"><div><p className="eyebrow">VISIT SUMMARY</p><h3>Who was visited</h3></div><strong>{visits.length}</strong></div>{byDoctor.size ? [...byDoctor.entries()].map(([name, count]) => <div className="data-row" key={name}><strong>{name}</strong><span>{count} visit{count === 1 ? '' : 's'}</span></div>) : <Empty text="Doctor visits and facilities will appear here when the records contain them." />}</section><section className="panel"><div className="panel-head"><div><p className="eyebrow">CHRONOLOGICAL VIEW</p><h3>Visits and procedures</h3></div></div>{visits.length ? <div className="timeline-list">{visits.map((event) => <div className="timeline-item" key={event.id}><span className="timeline-date">{event.event_date ? new Date(`${event.event_date}T00:00:00`).toLocaleDateString() : 'Date unknown'}</span><div><strong>{event.doctor_name || event.title}</strong><span>{[event.specialty, event.facility, event.visit_reason || event.summary].filter(Boolean).join(' · ') || event.event_type}</span><small>Source page {event.source_page ?? '—'}</small></div></div>)}</div> : <Empty text="No dated visits or procedures extracted yet." />}</section></div></Page>
 }
+function MedicinesPage({ medicines, onEdit, onDelete }: { medicines: Medication[]; onEdit: (med: Medication, brand: string, generic: string, strength: string, form: string) => Promise<void>; onDelete: (id: string) => Promise<void> }) {
+  return (
+    <Page title="Medicines" eyebrow="MEDICATION HISTORY">
+      <div className="panel full-panel">
+        <div className="panel-head">
+          <div>
+            <p className="eyebrow">EXTRACTED MEDICINES</p>
+            <h3>Prescribed or mentioned</h3>
+          </div>
+          <span className="muted">{medicines.length} medicine{medicines.length === 1 ? '' : 's'}</span>
+        </div>
+        {medicines.length ? (
+          medicines.map((med) => (
+            <MedicineRow key={med.id} med={med} onEdit={onEdit} onDelete={onDelete} />
+          ))
+        ) : (
+          <Empty text="Medicines will appear here when the extraction pipeline finds them." />
+        )}
+      </div>
+    </Page>
+  )
+}
+
+function MedicineRow({ med, onEdit, onDelete }: { med: Medication; onEdit: (med: Medication, brand: string, generic: string, strength: string, form: string) => Promise<void>; onDelete: (id: string) => Promise<void> }) {
+  const [editing, setEditing] = useState(false)
+  const [brand, setBrand] = useState(med.brand_name || '')
+  const [generic, setGeneric] = useState(med.generic_name || '')
+  const [strength, setStrength] = useState(med.strength || '')
+  const [form, setForm] = useState(med.dosage_form || '')
+  const [saving, setSaving] = useState(false)
+
+  if (editing) {
+    return (
+      <div className="data-row editing-row" style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '12px' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+          <input placeholder="Brand Name (e.g. Istamet)" value={brand} onChange={(e) => setBrand(e.target.value)} />
+          <input placeholder="Generic Name (e.g. Metformin)" value={generic} onChange={(e) => setGeneric(e.target.value)} />
+          <input placeholder="Strength (e.g. 50/500mg)" value={strength} onChange={(e) => setStrength(e.target.value)} />
+          <input placeholder="Form (e.g. tablet)" value={form} onChange={(e) => setForm(e.target.value)} />
+        </div>
+        <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+          <button type="button" className="secondary small" onClick={() => setEditing(false)}>Cancel</button>
+          <button type="button" className="primary small" disabled={saving} onClick={async () => { setSaving(true); await onEdit(med, brand, generic, strength, form); setSaving(false); setEditing(false) }}>{saving ? 'Saving…' : 'Save changes'}</button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="data-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <div>
+        <strong>{med.brand_name || med.generic_name || 'Unnamed medicine'}</strong>
+        <span>{[med.generic_name, med.strength, med.dosage_form, med.route].filter(Boolean).join(' · ') || 'Details pending'} · source page {med.source_page ?? '1'}</span>
+      </div>
+      <div style={{ display: 'flex', gap: '6px' }}>
+        <button type="button" className="retry-button" onClick={() => setEditing(true)} title="Edit medicine details" aria-label="Edit medicine"><Pencil size={14} /></button>
+        <button type="button" className="delete-button" onClick={() => onDelete(med.id)} title="Delete medicine" aria-label="Delete medicine"><Trash2 size={14} /></button>
+      </div>
+    </div>
+  )
+}
+
 function Page({ title, eyebrow, children }: { title: string; eyebrow: string; children: React.ReactNode }) { return <section className="page"><div className="page-intro"><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p className="muted">{title === 'Document library' ? 'Review upload status and source files.' : 'Everything extracted from the selected patient profile.'}</p></div>{children}</section> }
 function Empty({ text }: { text: string }) { return <div className="empty"><FileText size={23} /><strong>Nothing here yet</strong><span>{text}</span></div> }
 function testKey(name: string) { return name.toLowerCase().replace(/\[[^\]]*\]/g, '').replace(/\s+in\s+.*/g, '').replace(/[^a-z0-9]+/g, ' ').trim() }
@@ -478,9 +566,9 @@ function TrendChart({ trend, age, sex }: { trend: { name: string; unit: string |
   const points = [...trend.points].sort((a, b) => a.date.localeCompare(b.date)); const range = generalRange(trend.name, trend.unit, age, sex); const values = points.map((point) => point.value); const min = Math.min(...values, ...(range ? [range[0]] : [])); const max = Math.max(...values, ...(range ? [range[1]] : [])); const padding = Math.max((max - min) * 0.15, 0.1); const low = min - padding; const high = max + padding; const x = (index: number) => 48 + (index * 560) / Math.max(points.length - 1, 1); const y = (value: number) => 205 - ((value - low) / (high - low || 1)) * 165; const line = points.map((point, index) => `${x(index)},${y(point.value)}`).join(' ')
   return <article className="panel trend-card"><div className="panel-head"><div><p className="eyebrow">TREND</p><h3>{trend.name}</h3></div><span className="muted">{trend.unit ?? ''}</span></div><svg viewBox="0 0 640 240" role="img" aria-label={`${trend.name} over time`} className="trend-svg"><line x1="48" y1="205" x2="608" y2="205" className="chart-axis" />{range && <><rect x="48" y={y(range[1])} width="560" height={Math.max(y(range[0]) - y(range[1]), 1)} className="reference-band" /><text x="52" y={y(range[1]) - 6} className="chart-label">general range {range[0]}–{range[1]}</text></>}<polyline points={line} className="trend-line" />{points.map((point, index) => <g key={`${point.date}-${index}`}><circle cx={x(index)} cy={y(point.value)} r="4" className="trend-dot" /><text x={x(index)} y="224" textAnchor="middle" className="chart-label">{new Date(point.date).toLocaleDateString(undefined, { month: 'short', year: '2-digit' })}</text></g>)}</svg></article>
 }
-function AskArchivePage({ question, setQuestion, asking, answer, citations, onAsk, onOpenSource }: { question: string; setQuestion: (value: string) => void; asking: boolean; answer: string; citations: Array<{ document_id: string; page_start: number | null; page_end: number | null }>; onAsk: (event: React.FormEvent) => void; onOpenSource: (documentId: string) => void }) {
+function AskArchivePage({ question, setQuestion, asking, answer, citations, documents, onAsk, onOpenSource }: { question: string; setQuestion: (value: string) => void; asking: boolean; answer: string; citations: Array<{ document_id: string; page_start: number | null; page_end: number | null }>; documents: DocumentRecord[]; onAsk: (event: React.FormEvent) => void; onOpenSource: (documentId: string, page?: number | null) => void }) {
   const suggestions = ['What changed recently?', 'Show repeated lab values', 'What medicines are mentioned?']
-  return <Page title="Ask the archive" eyebrow="CITED SEARCH"><div className="panel full-panel ask-panel"><div className="ask-heading"><div className="ask-icon"><Search size={24} /></div><div><h3>Search across this patient’s records</h3><p className="muted">Answers use indexed records, source pages, and only the selected patient’s data.</p></div></div><div className="suggestion-row">{suggestions.map((suggestion) => <button key={suggestion} type="button" className="suggestion" onClick={() => setQuestion(suggestion)}>{suggestion}</button>)}</div><form className="ask-placeholder" onSubmit={onAsk}><input value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="Ask about labs, medicines, dates, or changes…" disabled={asking} /><button className="primary" type="submit" disabled={asking || !question.trim()}>{asking ? <><LoaderCircle className="spin" size={15} /> Searching</> : <><Search size={15} /> Search archive</>}</button></form>{answer ? <div className="answer-box"><div className="answer-title"><strong>Archive answer</strong><span>Source-grounded</span></div><p>{answer}</p>{citations.length > 0 && <div className="citation-list"><strong>Sources</strong>{citations.map((citation, index) => <button type="button" className="citation-link" key={`${citation.document_id}-${index}`} onClick={() => onOpenSource(citation.document_id)}><span>Document {citation.document_id.slice(0, 8)}</span><small>page {citation.page_start ?? '—'}{citation.page_end && citation.page_end !== citation.page_start ? `–${citation.page_end}` : ''} · Open source</small></button>)}</div>}</div> : <div className="ask-empty"><Search size={20} /><span>Ask a question to compare records, find dates, or trace repeated measurements.</span></div>}</div></Page>
+  return <Page title="Ask the archive" eyebrow="CITED SEARCH"><div className="panel full-panel ask-panel"><div className="ask-heading"><div className="ask-icon"><Search size={24} /></div><div><h3>Search across this patient’s records</h3><p className="muted">Answers use indexed records, source pages, and only the selected patient’s data.</p></div></div><div className="suggestion-row">{suggestions.map((suggestion) => <button key={suggestion} type="button" className="suggestion" onClick={() => setQuestion(suggestion)}>{suggestion}</button>)}</div><form className="ask-placeholder" onSubmit={onAsk}><input value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="Ask about labs, medicines, dates, or changes…" disabled={asking} /><button className="primary" type="submit" disabled={asking || !question.trim()}>{asking ? <><LoaderCircle className="spin" size={15} /> Searching</> : <><Search size={15} /> Search archive</>}</button></form>{answer ? <div className="answer-box"><div className="answer-title"><strong>Archive answer</strong><span>Source-grounded</span></div><p>{answer}</p>{citations.length > 0 && <div className="citation-list"><strong>Sources</strong>{citations.map((citation, index) => { const doc = documents.find((d) => d.id === citation.document_id); const p = citation.page_start ?? 1; return <button type="button" className="citation-link" key={`${citation.document_id}-${index}`} onClick={() => onOpenSource(citation.document_id, p)}><span>{doc?.original_filename || `Document ${citation.document_id.slice(0, 8)}`}</span><small>Page {p} · Open source PDF ↗</small></button> })}</div>}</div> : <div className="ask-empty"><Search size={20} /><span>Ask a question to compare records, find dates, or trace repeated measurements.</span></div>}</div></Page>
 }
 function Overview({ patient, documents, vitals, events, processingLabel, processingIcon, navigate }: { patient?: PatientProfile; documents: DocumentRecord[]; vitals: Vital[]; events: MedicalEvent[]; processingLabel: (s: string) => string; processingIcon: (s: string) => React.ReactNode; navigate: (s: string) => void }) {
   return (

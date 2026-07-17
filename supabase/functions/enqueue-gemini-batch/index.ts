@@ -14,7 +14,7 @@ const PROMPT = `You are an information extraction system for a medical archive. 
 ### GENERAL EXTRACTION RULES:
 1. Preserve exact original wording for diagnoses, medications, test names, and instructions whenever practical.
 2. Do not normalize medical terminology beyond formatting dates (ISO YYYY-MM-DD) and standard units.
-3. Page numbering starts at 1 (1-indexed).
+3. Page numbering starts at 1 (1-indexed). Multi-page PDFs contain distinct pages (1, 2, 3, 4, 5, 6). You MUST attach the exact 1-indexed page integer ("page": 1, 2, 3...) to EVERY extracted item (medication, vital, lab test, visit date, instruction) based on which page of the PDF image array it physically appeared on.
 4. If information is absent, use null for single values and [] for arrays. Never omit schema keys.
 5. If text cannot be read confidently due to poor scan quality or handwriting, mark certainty as "unreadable" or "ambiguous" rather than guessing.
 6. Do not duplicate identical medications or laboratory test results appearing across multiple pages.
@@ -311,10 +311,11 @@ async function indexExtraction(service: ReturnType<typeof createClient>, documen
   })
 
   const medicationSource = asArray(patient.medications ?? root.medications ?? root.medicines ?? patient.prescriptions ?? root.prescriptions)
-  const medications = medicationSource.flatMap((m) => {
+  const medications = medicationSource.flatMap((m, idx) => {
     const brand = m.brand_name ?? m.medicine ?? m.name ?? null
     const generic = m.generic_name ?? m.ingredient ?? null
     if (!brand && !generic) return []
+    const pageNum = typeof m.page === 'number' ? m.page : (typeof m.source_page === 'number' ? m.source_page : (idx + 1))
     return [{
       patient_id: document.patient_id,
       brand_name: brand,
@@ -325,7 +326,7 @@ async function indexExtraction(service: ReturnType<typeof createClient>, documen
       manufacturer: m.manufacturer ?? null,
       composition_status: m.status ?? m.composition_status ?? 'prescribed',
       source_document_id: document.id,
-      source_page: m.page ?? 1,
+      source_page: pageNum,
       confidence: m.certainty === 'explicit' ? 0.95 : 0.85,
     }]
   })

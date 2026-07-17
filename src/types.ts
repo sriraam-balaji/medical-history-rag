@@ -62,4 +62,5 @@ export type Medication = {
   dosage_form: string | null
   route: string | null
   composition_status: string
+  source_page?: number | null
 }
