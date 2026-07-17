@@ -655,7 +655,7 @@ Deno.serve(async (request) => {
   const body = await request.json().catch(() => null)
   const targetDocumentId = typeof body?.document_id === 'string' ? body.document_id : null
 
-  let documentQuery = userClient.from('documents').select('id, patient_id, original_filename, storage_path')
+  let documentQuery = service.from('documents').select('id, patient_id, original_filename, storage_path')
   if (targetDocumentId) {
     documentQuery = documentQuery.eq('id', targetDocumentId)
   } else {
