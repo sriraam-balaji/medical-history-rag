@@ -57,14 +57,18 @@ function App() {
   useEffect(() => {
     const onHash = () => setActiveTab(tabFromHash())
     window.addEventListener('hashchange', onHash)
-    if (window.location.hash.includes('type=recovery') || window.location.hash.includes('access_token')) {
+    if (window.location.hash.includes('error_description=')) {
+      const params = new URLSearchParams(window.location.hash.replace('#', ''))
+      const desc = params.get('error_description') || 'Email link is invalid or has expired'
+      setNotice(`${desc.replaceAll('+', ' ')}. Enter your email below and click "Forgot password?" for a fresh link.`)
+    } else if (window.location.hash.includes('type=recovery') || window.location.hash.includes('access_token')) {
       setRecoveryMode(true)
     }
     if (!supabase) return () => window.removeEventListener('hashchange', onHash)
     supabase.auth.getSession().then(({ data }) => setSessionEmail(data.session?.user.email ?? null))
     const { data } = supabase.auth.onAuthStateChange((event, current) => {
       setSessionEmail(current?.user.email ?? null)
-      if (event === 'PASSWORD_RECOVERY' || window.location.hash.includes('type=recovery')) {
+      if (event === 'PASSWORD_RECOVERY' || (window.location.hash.includes('type=recovery') && !window.location.hash.includes('error'))) {
         setRecoveryMode(true)
       }
     })
