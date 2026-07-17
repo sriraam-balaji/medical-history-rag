@@ -12,18 +12,21 @@ const PROMPT = `You are an information extraction system for a medical archive. 
 - "uncertain": The scan quality or content is insufficient to determine clinical nature.
 
 ### GENERAL EXTRACTION RULES:
-1. Preserve exact original wording for diagnoses, medications, test names, and instructions whenever practical.
-2. Do not normalize medical terminology beyond formatting dates (ISO YYYY-MM-DD) and standard units.
-3. Page numbering starts at 1 (1-indexed). Multi-page PDFs contain distinct pages (1, 2, 3, 4, 5, 6). You MUST attach the exact 1-indexed page integer ("page": 1, 2, 3...) to EVERY extracted item (medication, vital, lab test, visit date, instruction) based on which page of the PDF image array it physically appeared on.
-4. If information is absent, use null for single values and [] for arrays. Never omit schema keys.
-5. If text cannot be read confidently due to poor scan quality or handwriting, mark certainty as "unreadable" or "ambiguous" rather than guessing.
-6. Do not duplicate identical medications or laboratory test results appearing across multiple pages.
+1. Preserve exact original wording for diagnoses, medications, test names, and instructions whenever practical. Extract blood pressure and test values exactly as written.
+2. Do not normalize medical terminology beyond extracting raw values, date texts, and standard units.
+3. Page numbering starts at 1 (1-indexed). Multi-page PDFs contain distinct pages (1, 2, 3, 4, 5, 6). You MUST attach the exact 1-indexed page integer ("page": 1, 2, 3...) to EVERY extracted item (medication, vital, lab test, visit date, instruction, diagnosis) based on which page of the PDF image array it physically appeared on.
+4. DATES & TREND CHARTS / TABLES / SERIAL MEASUREMENTS:
+   - Search the entire document for all dates printed anywhere (Report Date, Sample Collection Date, Visit Date, Header/Footer dates, and dates inside historical result tables, miniature trend charts, plotted graphs, previous result columns, serial measurements, or comparison tables like '16-Nov-18', '20-Aug-25', '06-Nov-25', '06/11/2025').
+   - Preserve the exact association between each historical test reading/value and its corresponding date. If a report page contains historical comparison tables, trend graphs, or serial readings for a test (e.g. Haemoglobin on 16-Nov-18 = 13.6, 20-Aug-25 = 13.6, 06-Nov-25 = 14.2; ESR on 20-Aug-25 = 4, 06-Nov-25 = 7), extract EACH historical result reading as a separate object in "laboratory_results" or "vitals" with its corresponding "date_text" and "measured_at" date.
+   - Extract raw date strings as "date_text" (e.g., "16-Nov-18", "06/11/2025 6:59 PM"). Provide "measured_at" as ISO "YYYY-MM-DD" when unambiguous. If a specific reading date is present, use it. Otherwise, use the page or document's collection, report, or visit date.
+5. Deduplicate identical readings ONLY if they refer to the exact same measurement on the same date and same page.
+6. If information is absent, use null for single values and [] for arrays. Never omit schema keys.
 
 ### OUTPUT JSON SCHEMA:
 Return ONLY a valid JSON object matching this exact structure:
 {
   "content_classification": "medical_document",
-  "document_type": "prescription",
+  "document_type": "lab_report",
   "patient": {
     "name": null,
     "dob": null,
@@ -34,7 +37,14 @@ Return ONLY a valid JSON object matching this exact structure:
     "facility_name": null,
     "specialty": null
   },
-  "document_dates": [],
+  "document_dates": [
+    {
+      "date_text": "06/11/2025 6:59 PM",
+      "measured_at": "2025-11-06",
+      "context": "Reported On",
+      "page": 1
+    }
+  ],
   "medications": [
     {
       "brand_name": "Istamet",
@@ -50,23 +60,36 @@ Return ONLY a valid JSON object matching this exact structure:
   ],
   "vitals": [
     {
-      "type": "blood_pressure",
-      "value": "120/80",
+      "vital_type": "blood_pressure",
+      "value_text": "120/80",
       "numeric_value": 120,
       "unit": "mmHg",
-      "measured_at": null,
+      "date_text": "06/11/2025",
+      "measured_at": "2025-11-06",
       "page": 1
     }
   ],
   "laboratory_results": [
     {
-      "test_name_raw": "FBS",
-      "test_name_normalized": "Fasting Blood Sugar",
-      "numeric_value": 128,
-      "value_text": "128",
-      "unit": "mg/dL",
-      "reference_range": "70-99",
-      "measured_at": null,
+      "test_name_raw": "Haemoglobin (Hb)",
+      "test_name_normalized": "Hemoglobin",
+      "numeric_value": 13.6,
+      "value_text": "13.6",
+      "unit": "gm/dL",
+      "reference_range": "12-16",
+      "date_text": "16-Nov-18",
+      "measured_at": "2018-11-16",
+      "page": 1
+    },
+    {
+      "test_name_raw": "Haemoglobin (Hb)",
+      "test_name_normalized": "Hemoglobin",
+      "numeric_value": 14.2,
+      "value_text": "14.2",
+      "unit": "gm/dL",
+      "reference_range": "12-16",
+      "date_text": "06-Nov-25",
+      "measured_at": "2025-11-06",
       "page": 1
     }
   ],
@@ -77,19 +100,22 @@ Return ONLY a valid JSON object matching this exact structure:
       "doctor_name": "Dr R Indhumathi",
       "facility": "Gandhi Clinic",
       "visit_reason": null,
-      "event_date": null,
+      "event_date": "2025-11-06",
+      "date_text": "06/11/2025",
       "page": 1
     }
   ],
   "diagnoses": [
     {
       "raw_text": "Type 2 Diabetes Mellitus",
-      "certainty": "explicit"
+      "certainty": "explicit",
+      "page": 1
     }
   ]
 }`
 const EMBEDDING_MODELS = ['gemini-embedding-2', 'text-embedding-004', 'embedding-001']
 const FLASH_MODELS = ['gemini-3.1-flash-lite', 'gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash']
+const MODEL = 'gemini-3.1-flash-lite'
 const ENABLE_BATCH_API = Deno.env.get('ENABLE_GEMINI_BATCH') === 'true'
 
 function json(data: unknown, status = 200) {
@@ -208,24 +234,72 @@ function contentClassification(value: unknown): string {
   return String(root.content_classification ?? root.document_classification ?? root.classification ?? '').toLowerCase()
 }
 
+function parseFlexibleDate(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim()) return null
+  const str = value.trim()
+
+  // 1. ISO format: YYYY-MM-DD
+  const isoMatch = str.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/)
+  if (isoMatch) {
+    const y = Number(isoMatch[1]); const m = Number(isoMatch[2]); const d = Number(isoMatch[3])
+    if (m >= 1 && m <= 12 && d >= 1 && d <= 31) return `${y.toString().padStart(4, '0')}-${m.toString().padStart(2, '0')}-${d.toString().padStart(2, '0')}`
+  }
+
+  // 2. Text month formats: DD-MMM-YY, DD-MMM-YYYY, DD MMM YYYY (e.g. "16-Nov-18", "20-Aug-25", "06-Nov-2025", "16 Nov 2018")
+  const monthMap: Record<string, number> = {
+    jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+    january: 1, february: 2, march: 3, april: 4, june: 6, july: 7, august: 8, september: 9, october: 10, november: 11, december: 12
+  }
+  const textMonthMatch = str.match(/^(\d{1,2})[\s\/\.\-]+([A-Za-z]+)[\s\/\.\-]+(\d{2}|\d{4})/)
+  if (textMonthMatch) {
+    const day = Number(textMonthMatch[1])
+    const month = monthMap[textMonthMatch[2].toLowerCase()]
+    let year = Number(textMonthMatch[3])
+    if (textMonthMatch[3].length === 2) year = year > 50 ? 1900 + year : 2000 + year
+    if (month && day >= 1 && day <= 31) return `${year.toString().padStart(4, '0')}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`
+  }
+
+  // 3. Text month first: MMM-DD-YY, MMM DD, YYYY
+  const textMonthFirst = str.match(/^([A-Za-z]+)[\s\/\.\-]+(\d{1,2})[\s\/\.\,]+(\d{2}|\d{4})/)
+  if (textMonthFirst) {
+    const month = monthMap[textMonthFirst[1].toLowerCase()]
+    const day = Number(textMonthFirst[2])
+    let year = Number(textMonthFirst[3])
+    if (textMonthFirst[3].length === 2) year = year > 50 ? 1900 + year : 2000 + year
+    if (month && day >= 1 && day <= 31) return `${year.toString().padStart(4, '0')}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`
+  }
+
+  // 4. Indian numeric formats: DD/MM/YYYY or DD-MM-YYYY (e.g. "06/11/2025 6:59 PM" or "06-11-2025")
+  const numericMatch = str.match(/^(\d{1,2})[\/\.\-](\d{1,2})[\/\.\-](\d{2}|\d{4})/)
+  if (numericMatch) {
+    const day = Number(numericMatch[1])
+    const month = Number(numericMatch[2])
+    let year = Number(numericMatch[3])
+    if (numericMatch[3].length === 2) year = year > 50 ? 1900 + year : 2000 + year
+    if (day >= 1 && day <= 31 && month >= 1 && month <= 12) return `${year.toString().padStart(4, '0')}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`
+  }
+
+  const d = new Date(str)
+  if (!Number.isNaN(d.getTime())) return d.toISOString().split('T')[0]
+  return null
+}
+
 function dateOnly(value: unknown): string | null {
-  if (typeof value !== 'string' || !value) return null
-  const match = value.match(/^\d{4}-\d{2}-\d{2}/)
-  if (match) return match[0]
-  const short = value.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2}|\d{4})/)
-  if (!short) return null
-  const first = Number(short[1]); const second = Number(short[2]); const year = Number(short[3].length === 2 ? `20${short[3]}` : short[3])
-  // The archive is configured for Indian records, so slash dates default to DD/MM/YY.
-  const day = first
-  const month = second
-  if (day < 1 || day > 31 || month < 1 || month > 12) return null
-  return `${year.toString().padStart(4, '0')}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`
+  return parseFlexibleDate(value)
+}
+
+function toIsoDateTime(value: unknown): string | null {
+  const parsedDate = parseFlexibleDate(value)
+  if (parsedDate) return `${parsedDate}T00:00:00.000Z`
+  if (typeof value === 'string' && value) {
+    const d = new Date(value)
+    if (!Number.isNaN(d.getTime())) return d.toISOString()
+  }
+  return null
 }
 
 function dateTime(value: unknown): string | null {
-  if (typeof value !== 'string' || !value) return null
-  const parsed = new Date(value)
-  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString()
+  return toIsoDateTime(value)
 }
 
 async function embedText(text: string, apiKey: string): Promise<{ values: number[]; model: string }> {
@@ -270,30 +344,57 @@ async function indexExtraction(service: ReturnType<typeof createClient>, documen
   const pageDateMap = new Map<number, string>()
   const documentDates = asArray(root.document_dates)
   for (const dateItem of documentDates) {
-    const rawVal = typeof dateItem === 'object' && dateItem ? (dateItem.date ?? dateItem.raw_date) : String(dateItem)
-    const parsedDate = dateOnly(rawVal)
+    const rawVal = typeof dateItem === 'object' && dateItem ? (dateItem.date ?? dateItem.date_text ?? dateItem.raw_date) : String(dateItem)
+    const parsedDate = parseFlexibleDate(rawVal)
     const pageNum = typeof dateItem === 'object' && dateItem && typeof dateItem.page === 'number' ? dateItem.page : 1
     if (parsedDate) pageDateMap.set(pageNum, parsedDate)
   }
-  const defaultDocDate = dateOnly(root.date ?? root.visit_date ?? root.consultation_date)
+
+  // Explicit Date Fallback Precedence Hierarchy:
+  // measurement date -> sample collection date -> report date -> visit date -> document header date -> document upload date
+  const defaultDocDateRaw = root.measured_at ?? root.sample_date ?? root.report_date ?? root.date ?? root.visit_date ?? root.consultation_date
+  const defaultDocDate = parseFlexibleDate(defaultDocDateRaw) || (document.created_at ? parseFlexibleDate(document.created_at) : null)
 
   const labs: any[] = []
   const labReports = asArray(patient.laboratory_reports ?? root.laboratory_reports ?? root.laboratory_results ?? root.lab_results ?? root.lab_reports ?? patient.laboratory_results)
+  const seenLabKeys = new Set<string>()
+
   for (const report of labReports) {
     const reportPage = typeof report.page === 'number' ? report.page : 1
-    const reportDate = dateTime(report.date ?? report.measured_at ?? pageDateMap.get(reportPage) ?? defaultDocDate)
+    const reportDateRaw = report.measured_at ?? report.sample_date ?? report.report_date ?? report.date ?? pageDateMap.get(reportPage) ?? defaultDocDate
     const results = asArray(report.results ?? report.tests ?? (report.test_name_raw || report.test || report.name ? [report] : []))
     for (const result of results) {
       const rawName = String(result.test_name_raw ?? result.test ?? result.name ?? '').trim()
       if (!rawName) continue
       const resPage = typeof result.page === 'number' ? result.page : reportPage
-      const measuredAt = dateTime(result.measured_at ?? result.date ?? reportDate ?? pageDateMap.get(resPage) ?? defaultDocDate)
+      
+      // Strict Precedence Fallback for each measurement
+      const resultDateRaw = result.measured_at ?? result.date ?? result.date_text ?? result.visit_date ?? reportDateRaw ?? pageDateMap.get(resPage) ?? defaultDocDate
+      const measuredAt = toIsoDateTime(resultDateRaw) || (document.created_at ? new Date(document.created_at).toISOString() : null)
+
+      let numVal: number | null = null
+      if (typeof result.numeric_value === 'number') {
+        numVal = result.numeric_value
+      } else if (typeof result.value === 'number') {
+        numVal = result.value
+      } else {
+        const parsedNum = parseFloat(String(result.value_text ?? result.value ?? ''))
+        if (!Number.isNaN(parsedNum)) numVal = parsedNum
+      }
+
+      const valText = result.value_text != null ? String(result.value_text) : (result.value != null ? String(result.value) : null)
+      
+      // Deduplication: prevent identical readings on same date & page
+      const dedupKey = `${rawName.toLowerCase()}|${numVal ?? valText}|${measuredAt?.split('T')[0]}|${resPage}`
+      if (seenLabKeys.has(dedupKey)) continue
+      seenLabKeys.add(dedupKey)
+
       labs.push({
         patient_id: document.patient_id,
         test_name_raw: rawName,
         test_name_normalized: result.test_name_normalized ?? result.normalized_name ?? null,
-        value_text: result.value_text != null ? String(result.value_text) : (result.value != null ? String(result.value) : null),
-        numeric_value: typeof result.numeric_value === 'number' ? result.numeric_value : (typeof result.value === 'number' ? result.value : Number(result.value) || null),
+        value_text: valText,
+        numeric_value: numVal,
         unit: result.unit ?? null,
         reference_range: result.reference_range ?? null,
         measured_at: measuredAt,
@@ -305,24 +406,102 @@ async function indexExtraction(service: ReturnType<typeof createClient>, documen
     }
   }
 
-  const vitals = asArray(patient.vitals ?? root.vitals).flatMap((v, idx) => {
-    const rawVal = v.numeric_value ?? v.value
-    const numVal = typeof rawVal === 'number' ? rawVal : Number(rawVal)
-    const type = String(v.vital_type ?? v.type ?? v.name ?? 'Vital').trim()
+  const vitals: any[] = []
+  const seenVitalKeys = new Set<string>()
+  const rawVitalsList = asArray(patient.vitals ?? root.vitals)
+
+  for (let idx = 0; idx < rawVitalsList.length; idx++) {
+    const v = rawVitalsList[idx]
     const pageNum = typeof v.page === 'number' ? v.page : (idx + 1)
-    const measuredAt = dateTime(v.measured_at ?? v.date ?? pageDateMap.get(pageNum) ?? defaultDocDate)
-    return type ? [{
-      patient_id: document.patient_id,
-      vital_type: type,
-      value: Number.isFinite(numVal) ? numVal : 0,
-      unit: v.unit ?? null,
-      measured_at: measuredAt,
-      source_document_id: document.id,
-      source_page: pageNum,
-      evidence: JSON.stringify(v),
-      confidence: v.certainty === 'explicit' ? 0.95 : 0.8,
-    }] : []
-  })
+    const rawType = String(v.vital_type ?? v.type ?? v.name ?? 'Vital').trim()
+    if (!rawType) continue
+
+    const rawDate = v.measured_at ?? v.date ?? v.date_text ?? pageDateMap.get(pageNum) ?? defaultDocDate
+    const measuredAt = toIsoDateTime(rawDate) || (document.created_at ? new Date(document.created_at).toISOString() : null)
+
+    const rawValStr = String(v.value_text ?? v.value ?? v.numeric_value ?? '').trim()
+    const isBp = rawType.toLowerCase().includes('blood_pressure') || rawType.toLowerCase().includes('blood pressure') || rawType.toLowerCase() === 'bp'
+    
+    // Blood Pressure Regex Normalization Layer:
+    // Accept: 120/80, 120 / 80, 120-80, 120 over 80
+    // Reject non-numeric qualitative text like "BP normal" or "BP controlled"
+    const bpMatch = rawValStr.match(/^(\d{2,3})\s*(?:[\/\\-]|over)\s*(\d{2,3})/i)
+
+    if (bpMatch || (isBp && /^\d{2,3}/.test(rawValStr))) {
+      const sys = bpMatch ? Number(bpMatch[1]) : (typeof v.numeric_value === 'number' ? v.numeric_value : Number(rawValStr.match(/^\d+/)?.[0]) || null)
+      const dia = bpMatch ? Number(bpMatch[2]) : null
+
+      if (sys && Number.isFinite(sys)) {
+        const sysKey = `systolic blood pressure|${sys}|${measuredAt?.split('T')[0]}|${pageNum}`
+        if (!seenVitalKeys.has(sysKey)) {
+          seenVitalKeys.add(sysKey)
+          vitals.push({
+            patient_id: document.patient_id,
+            vital_type: 'Systolic Blood Pressure',
+            value: sys,
+            unit: v.unit ?? 'mmHg',
+            measured_at: measuredAt,
+            source_document_id: document.id,
+            source_page: pageNum,
+            evidence: JSON.stringify(v),
+            confidence: v.certainty === 'explicit' ? 0.95 : 0.8,
+          })
+        }
+
+        const genBpKey = `blood_pressure|${sys}|${measuredAt?.split('T')[0]}|${pageNum}`
+        if (!seenVitalKeys.has(genBpKey)) {
+          seenVitalKeys.add(genBpKey)
+          vitals.push({
+            patient_id: document.patient_id,
+            vital_type: 'blood_pressure',
+            value: sys,
+            unit: v.unit ?? 'mmHg',
+            measured_at: measuredAt,
+            source_document_id: document.id,
+            source_page: pageNum,
+            evidence: JSON.stringify(v),
+            confidence: v.certainty === 'explicit' ? 0.95 : 0.8,
+          })
+        }
+      }
+
+      if (dia && Number.isFinite(dia)) {
+        const diaKey = `diastolic blood pressure|${dia}|${measuredAt?.split('T')[0]}|${pageNum}`
+        if (!seenVitalKeys.has(diaKey)) {
+          seenVitalKeys.add(diaKey)
+          vitals.push({
+            patient_id: document.patient_id,
+            vital_type: 'Diastolic Blood Pressure',
+            value: dia,
+            unit: v.unit ?? 'mmHg',
+            measured_at: measuredAt,
+            source_document_id: document.id,
+            source_page: pageNum,
+            evidence: JSON.stringify(v),
+            confidence: v.certainty === 'explicit' ? 0.95 : 0.8,
+          })
+        }
+      }
+    } else {
+      // General Vital parsing (or qualitative text BP)
+      const numVal = typeof v.numeric_value === 'number' ? v.numeric_value : (typeof v.value === 'number' ? v.value : Number(v.value) || Number(rawValStr) || 0)
+      const key = `${rawType.toLowerCase()}|${numVal}|${measuredAt?.split('T')[0]}|${pageNum}`
+      if (!seenVitalKeys.has(key)) {
+        seenVitalKeys.add(key)
+        vitals.push({
+          patient_id: document.patient_id,
+          vital_type: rawType,
+          value: Number.isFinite(numVal) ? numVal : 0,
+          unit: v.unit ?? null,
+          measured_at: measuredAt,
+          source_document_id: document.id,
+          source_page: pageNum,
+          evidence: JSON.stringify(v),
+          confidence: v.certainty === 'explicit' ? 0.95 : 0.8,
+        })
+      }
+    }
+  }
 
   const medicationSource = asArray(patient.medications ?? root.medications ?? root.medicines ?? patient.prescriptions ?? root.prescriptions)
   const medications = medicationSource.flatMap((m, idx) => {

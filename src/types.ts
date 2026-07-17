@@ -50,6 +50,7 @@ export type LabResult = {
   value_text: string | null
   numeric_value: number | null
   unit: string | null
+  reference_range?: string | null
   measured_at: string | null
   source_page: number | null
 }

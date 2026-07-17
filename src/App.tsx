@@ -269,6 +269,7 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
     let done = 0
     let uploadedCount = 0
     const uploadErrors: string[] = []
+    const newlyUploadedDocIds: string[] = []
     for (const file of files) {
       const id = crypto.randomUUID()
       const prepared = await prepareFileForUpload(file)
@@ -321,7 +322,10 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
         const { data: userData } = await supabase.auth.getUser()
         const insert = await supabase.from('documents').insert({ id, patient_id: selectedPatient, original_filename: file.name, storage_path: path, processing_status: 'queued', created_by: userData.user?.id })
         if (insert.error) uploadErrors.push(`${file.name}: ${insert.error.message}`)
-        else uploadedCount += 1
+        else {
+          uploadedCount += 1
+          newlyUploadedDocIds.push(id)
+        }
       }
       done += 1; setUploadProgress(done)
     }
@@ -336,20 +340,22 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
       await refreshPatientData(selectedPatient)
       return
     }
-    if (uploadErrors.length) setNotice(`${uploadedCount} file${uploadedCount === 1 ? '' : 's'} uploaded. ${uploadErrors[0]}`)
-    const { data: processingResult, error } = await supabase.functions.invoke('enqueue-gemini-batch').catch((err) => ({ data: null, error: err }))
+    
+    // Process each document individually to prevent wall-clock execution timeouts on batch processing
+    let processed = 0
+    setNotice(`Uploaded ${uploadedCount} file${uploadedCount === 1 ? '' : 's'}. Extracting lab trends & vitals (1/${uploadedCount})…`)
+    await refreshPatientData(selectedPatient)
+
+    for (const docId of newlyUploadedDocIds) {
+      processed += 1
+      setNotice(`Extracting lab trends & vitals (${processed}/${uploadedCount})…`)
+      await supabase.functions.invoke('enqueue-gemini-batch', { body: { document_id: docId } }).catch(console.warn)
+      await refreshPatientData(selectedPatient)
+    }
+
     setUploadingFiles(false)
-    const failedResult = processingResult?.results?.find((result: { status: string; error?: string }) => result.error || result.status === 'failed_retryable')
-    const failedErrorMessage = failedResult?.error && !/classified this upload as|Only medical records are accepted/i.test(failedResult.error) ? failedResult.error : null
-    const transientFetchError = error && /failed to fetch|network|timeout|timed out/i.test(error.message)
-    setNotice(error
-      ? transientFetchError
-        ? 'Files uploaded. Processing is running in the background; your library will update automatically.'
-        : `Files uploaded, but backend trigger notice: ${error.message}`
-      : failedErrorMessage
-        ? `Upload completed, but backend notice: ${failedErrorMessage}`
-        : `Upload completed successfully! ${uploadedCount} file${uploadedCount === 1 ? '' : 's'} added to your medical document library.`)
-    await refreshPatientData(selectedPatient); event.target.value = ''
+    setNotice(`Successfully uploaded & extracted ${uploadedCount} file${uploadedCount === 1 ? '' : 's'}! Check Vitals & Labs for updated trend graphs.`)
+    event.target.value = ''
   }
 
   async function deleteDocument(document: DocumentRecord) {
@@ -366,10 +372,6 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
 
   async function retryDocument(document: DocumentRecord) {
     if (!supabase || deletingDocumentId) return
-    if ((document.retry_count ?? 0) >= 1) {
-      setNotice('This document has reached its 1 allowed retry limit.')
-      return
-    }
     setDeletingDocumentId(document.id)
     const { error: updateError } = await supabase.from('documents').update({
       processing_status: 'queued',
@@ -385,15 +387,36 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
       return
     }
 
-    setNotice('Extraction in progress… Parsing medicines, vitals, and visits.')
-    const { data: processingResult, error: functionError } = await supabase.functions.invoke('enqueue-gemini-batch', { body: { document_id: document.id } }).catch((err) => ({ data: null, error: err }))
+    setNotice(`Extraction in progress for “${document.original_filename}”… Parsing lab trends and vitals.`)
+    const { data: processingResult, error: functionError } = await supabase.functions
+      .invoke('enqueue-gemini-batch', { body: { document_id: document.id } })
+      .catch((err) => ({ data: null, error: err }))
     setDeletingDocumentId(null)
     if (functionError) {
-      setNotice('Document queued! Gemini backend is parsing doctor notes and labs.')
+      setNotice('Document queued for backend processing.')
     } else {
-      setNotice('Extraction completed! Check Medicines, Vitals & Labs, and Care Timeline.')
+      setNotice('Extraction completed! Check Vitals & Labs for updated trend graphs.')
     }
     await refreshPatientData(selectedPatient)
+  }
+
+  async function processAllQueuedDocuments() {
+    if (!supabase || !selectedPatient) return
+    const pendingDocs = documents.filter((d) => d.processing_status !== 'indexed')
+    if (!pendingDocs.length) {
+      setNotice('All uploaded documents are already processed.')
+      return
+    }
+
+    let count = 0
+    setNotice(`Processing ${pendingDocs.length} queued document${pendingDocs.length === 1 ? '' : 's'}…`)
+    for (const doc of pendingDocs) {
+      count += 1
+      setNotice(`Extracting document ${count} of ${pendingDocs.length} (“${doc.original_filename}”)…`)
+      await supabase.functions.invoke('enqueue-gemini-batch', { body: { document_id: doc.id } }).catch(console.warn)
+      await refreshPatientData(selectedPatient)
+    }
+    setNotice('Extraction completed for all queued documents!')
   }
 
   async function askArchive(event: React.FormEvent) {
@@ -417,7 +440,17 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
     window.open(data.signedUrl + pageHash, '_blank', 'noopener,noreferrer')
   }
 
-  function processingLabel(status: string) { return ({ queued: 'Processing in queue', batch_submitted: 'Processing', processing: 'Processing', validated: 'Extracted', indexed: 'Searchable', failed_retryable: 'Processing', failed_permanent: 'Processing in queue' } as Record<string, string>)[status] ?? 'Processing' }
+  function processingLabel(status: string) {
+    return ({
+      queued: 'Queued for extraction',
+      batch_submitted: 'Processing with Gemini',
+      processing: 'Extracting trends & labs...',
+      validated: 'Extracted',
+      indexed: 'Searchable & trended',
+      failed_retryable: 'Needs retry',
+      failed_permanent: 'Unreadable / non-medical'
+    } as Record<string, string>)[status] ?? 'Processing'
+  }
   function processingIcon(status: string) { if (status === 'indexed' || status === 'validated') return <CheckCircle2 size={13} />; return <LoaderCircle className="spin" size={13} /> }
   const activePatient = useMemo(() => patients.find((p) => p.id === selectedPatient), [patients, selectedPatient])
   const displayPatients = supabaseConfigured ? patients : demoPatients
@@ -450,8 +483,50 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
     }
   }
 
-  const documentList = <div className="document-list">{documents.map((doc) => <div className="document-row" key={doc.id}><div className="file-icon"><FileText size={17} /></div><div className="document-name"><strong>{doc.original_filename}</strong><span>{doc.document_type || (doc.processing_status === 'indexed' ? 'Prescription / Medical record' : 'Processing document')}</span></div><span className={`status ${doc.processing_status}`}>{processingIcon(doc.processing_status)} {processingLabel(doc.processing_status)}</span>{(doc.processing_status !== 'indexed') && (doc.retry_count ?? 0) < 1 && <button className="retry-button" onClick={() => retryDocument(doc)} disabled={deletingDocumentId === doc.id} aria-label="Retry processing" title="Retry processing"><RefreshCw size={14} /></button>}<button className="delete-button" onClick={() => deleteDocument(doc)} disabled={deletingDocumentId === doc.id} aria-label={`Delete ${doc.original_filename}`} title="Delete document">{deletingDocumentId === doc.id ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}</button></div>)}</div>
-  const legacyPage = activeTab === 'Documents' ? <Page title="Document library" eyebrow="YOUR RECORDS"><div className="panel full-panel"><div className="panel-head"><div><p className="eyebrow">SOURCE FILES</p><h3>Every uploaded record</h3></div><span className="muted">{documents.length} file{documents.length === 1 ? '' : 's'}</span></div>{documents.length ? documentList : <Empty text="Upload a PDF or a clear photo of a medical page." />}</div></Page>
+  const documentList = (
+    <div className="document-list">
+      {documents.map((doc) => (
+        <div className="document-row" key={doc.id}>
+          <div className="file-icon"><FileText size={17} /></div>
+          <div className="document-name">
+            <strong>{doc.original_filename}</strong>
+            <span>{doc.document_type || (doc.processing_status === 'indexed' ? 'Prescription / Medical record' : 'Processing document')}</span>
+          </div>
+          <span className={`status ${doc.processing_status}`}>{processingIcon(doc.processing_status)} {processingLabel(doc.processing_status)}</span>
+          {doc.processing_status !== 'indexed' && (
+            <button className="retry-button" onClick={() => retryDocument(doc)} disabled={deletingDocumentId === doc.id} aria-label="Re-extract document" title="Re-extract document">
+              <RefreshCw size={14} />
+            </button>
+          )}
+          <button className="delete-button" onClick={() => deleteDocument(doc)} disabled={deletingDocumentId === doc.id} aria-label={`Delete ${doc.original_filename}`} title="Delete document">
+            {deletingDocumentId === doc.id ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}
+          </button>
+        </div>
+      ))}
+    </div>
+  )
+
+  const legacyPage = activeTab === 'Documents' ? (
+    <Page title="Document library" eyebrow="YOUR RECORDS">
+      <div className="panel full-panel">
+        <div className="panel-head">
+          <div>
+            <p className="eyebrow">SOURCE FILES</p>
+            <h3>Every uploaded record</h3>
+          </div>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <span className="muted">{documents.length} file{documents.length === 1 ? '' : 's'}</span>
+            {documents.some((d) => d.processing_status !== 'indexed') && (
+              <button className="secondary small" onClick={processAllQueuedDocuments} style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '13px', padding: '4px 10px' }}>
+                <RefreshCw size={13} /> Process all queued
+              </button>
+            )}
+          </div>
+        </div>
+        {documents.length ? documentList : <Empty text="Upload a PDF or a clear photo of a medical page." />}
+      </div>
+    </Page>
+  )
     : activeTab === 'Medicines' ? <MedicinesPage medicines={medicines} onEdit={updateMedication} onDelete={deleteMedication} />
     : activeTab === 'Doctors & visits' ? <VisitPage events={events} />
     : activeTab === 'Vitals & labs' ? <Page title="Vitals & labs" eyebrow="STRUCTURED HISTORY"><div className="content-grid"><div className="panel"><div className="panel-head"><div><p className="eyebrow">VITALS</p><h3>Measurements</h3></div><strong>{vitals.length}</strong></div>{vitals.length ? vitals.map((v) => <div className="data-row" key={v.id}><strong>{v.vital_type}: {v.value} {v.unit ?? ''}</strong><span>{v.measured_at ? new Date(v.measured_at).toLocaleDateString() : 'Date not recorded'} · page {v.source_page ?? '—'}</span></div>) : <Empty text="No vitals extracted yet." />}</div><div className="panel"><div className="panel-head"><div><p className="eyebrow">LAB RESULTS</p><h3>Latest values</h3></div><strong>{labs.length}</strong></div>{labs.length ? labs.slice(0, 20).map((lab) => <div className="data-row" key={lab.id}><strong>{lab.test_name_raw}: {lab.value_text ?? lab.numeric_value ?? '—'} {lab.unit ?? ''}</strong><span>{lab.measured_at ? new Date(lab.measured_at).toLocaleDateString() : 'Date not recorded'} · page {lab.source_page ?? '—'}</span></div>) : <Empty text="No blood test reports found in uploaded documents. Medicines, clinic visits & prescriptions captured." />}</div></div></Page>
@@ -554,30 +629,185 @@ function Page({ title, eyebrow, children }: { title: string; eyebrow: string; ch
 function Empty({ text }: { text: string }) { return <div className="empty"><FileText size={23} /><strong>Nothing here yet</strong><span>{text}</span></div> }
 function testKey(name: string) { return name.toLowerCase().replace(/\[[^\]]*\]/g, '').replace(/\s+in\s+.*/g, '').replace(/[^a-z0-9]+/g, ' ').trim() }
 function patientAge(dob?: string | null) { if (!dob) return null; const birth = new Date(dob); const now = new Date(); let age = now.getFullYear() - birth.getFullYear(); if (now < new Date(now.getFullYear(), birth.getMonth(), birth.getDate())) age--; return age }
+
+function formatDateLabel(dateStr: string) {
+  if (!dateStr) return '—'
+  const datePart = dateStr.split('T')[0]
+  const [year, month, day] = datePart.split('-').map(Number)
+  if (year && month && day) {
+    const d = new Date(year, month - 1, day)
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: '2-digit' })
+  }
+  return dateStr
+}
+
 function generalRange(name: string, unit: string | null, age: number | null, sex?: string | null): [number, number] | null {
   const key = testKey(name); const u = (unit ?? '').toLowerCase();
-  if (key === 'glucose' && u.includes('mg/dl')) return [70, 99]
+  if ((key.includes('glucose') || key === 'fbs') && (u.includes('mg/dl') || !u)) return [70, 99]
+  if (key === 'ppbs' && (u.includes('mg/dl') || !u)) return [70, 140]
+  if (key.includes('hba1c')) return [4.0, 5.7]
+  if (key.includes('systolic') || key === 'blood pressure' || key === 'blood pressure') return [90, 120]
+  if (key.includes('diastolic')) return [60, 80]
+  if (key.includes('esr') || key.includes('erythrocyte sedimentation')) return [0, 20]
+  if (key.includes('leucocyte') || key.includes('wbc') || key.includes('leukocyte')) return [4000, 11000]
+  if (key.includes('platelet')) return u.includes('10') ? [150, 450] : [150000, 450000]
   if (key === 'creatinine' && u.includes('mg/dl')) return sex === 'female' ? [0.5, 1.1] : [0.7, 1.3]
-  if (key === 'sodium' && u.includes('mmol')) return [135, 145]
-  if (key === 'potassium' && u.includes('mmol')) return [3.5, 5.1]
-  if (key === 'calcium' && u.includes('mg/dl')) return [8.5, 10.5]
-  if (key === 'hemoglobin' && u.includes('g/dl')) return sex === 'female' ? [12, 16] : [13.5, 17.5]
-  if (key === 'hematocrit' && u.includes('%')) return sex === 'female' ? [36, 46] : [41, 53]
-  if (key === 'leukocytes' && u.includes('10')) return [4, 11]
-  if (key === 'platelets' && u.includes('10')) return [150, 450]
+  if (key === 'sodium') return [135, 145]
+  if (key === 'potassium') return [3.5, 5.1]
+  if (key === 'calcium') return [8.5, 10.5]
+  if ((key.includes('hemoglobin') || key === 'hb') && !key.includes('hba1c')) return sex === 'female' ? [12, 16] : [13.5, 17.5]
+  if (key === 'hematocrit') return sex === 'female' ? [36, 46] : [41, 53]
+  if (key.includes('triglyceride') || key === 'tgl') return [50, 150]
+  if (key.includes('cholesterol') && !key.includes('hdl') && !key.includes('ldl')) return [125, 200]
+  if (key.includes('hdl') && !key.includes('non')) return [40, 60]
+  if (key.includes('ldl') && !key.includes('vldl')) return [50, 100]
   return null
 }
+
 function VitalsPage({ labs, vitals, patient }: { labs: LabResult[]; vitals: Vital[]; patient?: PatientProfile }) {
   const groups = new Map<string, { name: string; unit: string | null; points: Array<{ date: string; value: number }> }>()
-  for (const lab of labs) if (lab.numeric_value != null) { const key = testKey(lab.test_name_normalized || lab.test_name_raw); const current = groups.get(key) ?? { name: lab.test_name_normalized || lab.test_name_raw, unit: lab.unit, points: [] }; if (lab.measured_at) current.points.push({ date: lab.measured_at, value: lab.numeric_value }); groups.set(key, current) }
-  for (const vital of vitals) { const key = testKey(vital.vital_type); const current = groups.get(key) ?? { name: vital.vital_type, unit: vital.unit, points: [] }; if (vital.measured_at) current.points.push({ date: vital.measured_at, value: vital.value }); groups.set(key, current) }
+  
+  for (const lab of labs) {
+    if (lab.numeric_value != null && Number.isFinite(Number(lab.numeric_value))) {
+      const name = lab.test_name_normalized || lab.test_name_raw
+      const key = testKey(name)
+      const current = groups.get(key) ?? { name, unit: lab.unit, points: [] }
+      if (lab.measured_at) {
+        current.points.push({ date: lab.measured_at, value: Number(lab.numeric_value) })
+      }
+      groups.set(key, current)
+    }
+  }
+
+  for (const vital of vitals) {
+    if (vital.value != null && Number.isFinite(Number(vital.value)) && Number(vital.value) > 0) {
+      const name = vital.vital_type
+      const key = testKey(name)
+      const current = groups.get(key) ?? { name, unit: vital.unit, points: [] }
+      if (vital.measured_at) {
+        current.points.push({ date: vital.measured_at, value: Number(vital.value) })
+      }
+      groups.set(key, current)
+    }
+  }
+
+  // Deduplicate identical date-value pairs and sort chronologically by parsed Date timestamp
+  for (const group of groups.values()) {
+    const seen = new Set<string>()
+    group.points = group.points.filter((pt) => {
+      const k = `${pt.date.split('T')[0]}|${pt.value}`
+      if (seen.has(k)) return false
+      seen.add(k)
+      return true
+    }).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+  }
+
   const trends = [...groups.values()].filter((group) => group.points.length > 1).sort((a, b) => a.name.localeCompare(b.name))
   const age = patientAge(patient?.date_of_birth)
-  return <Page title="Vitals & labs" eyebrow="STRUCTURED HISTORY"><div className="reference-note">Reference bands are general adult guides, not diagnoses. Prefer the range printed on the original report; age-specific ranges require a recorded date of birth.</div>{trends.length > 0 && <section className="trend-grid">{trends.map((trend) => <TrendChart key={`${trend.name}-${trend.unit}`} trend={trend} age={age} sex={patient?.biological_sex} />)}</section>}<div className="content-grid"><div className="panel"><div className="panel-head"><div><p className="eyebrow">VITALS</p><h3>Measurements</h3></div><strong>{vitals.length}</strong></div>{vitals.length ? vitals.map((v) => <div className="data-row" key={v.id}><strong>{v.vital_type}: {v.value} {v.unit ?? ''}</strong><span>{v.measured_at ? new Date(v.measured_at).toLocaleDateString() : 'Date not recorded'} · page {v.source_page ?? '—'}</span></div>) : <Empty text="No vitals extracted yet." />}</div><div className="panel"><div className="panel-head"><div><p className="eyebrow">LAB RESULTS</p><h3>Latest values</h3></div><strong>{labs.length}</strong></div>{labs.length ? <div className="lab-list" style={{ maxHeight: '520px', overflowY: 'auto' }}>{labs.map((lab) => <div className="data-row" key={lab.id} style={{ padding: '8px 0' }}><strong>{lab.test_name_raw}: {lab.value_text ?? lab.numeric_value ?? '—'} {lab.unit ?? ''}</strong><span>{lab.measured_at ? new Date(lab.measured_at).toLocaleDateString() : 'Date not recorded'} · page {lab.source_page ?? '—'}</span></div>)}</div> : <Empty text="No blood test reports found in uploaded documents." />}</div></div></Page>
+
+  return (
+    <Page title="Vitals & labs" eyebrow="STRUCTURED HISTORY">
+      <div className="reference-note">
+        Reference bands are general adult guides, not diagnoses. Prefer the range printed on the original report; age-specific ranges require a recorded date of birth.
+      </div>
+      {trends.length > 0 && (
+        <section className="trend-grid">
+          {trends.map((trend) => (
+            <TrendChart key={`${trend.name}-${trend.unit}`} trend={trend} age={age} sex={patient?.biological_sex} />
+          ))}
+        </section>
+      )}
+      <div className="content-grid">
+        <div className="panel">
+          <div className="panel-head">
+            <div>
+              <p className="eyebrow">VITALS</p>
+              <h3>Measurements</h3>
+            </div>
+            <strong>{vitals.length}</strong>
+          </div>
+          {vitals.length ? (
+            vitals.map((v) => (
+              <div className="data-row" key={v.id}>
+                <strong>{v.vital_type}: {v.value} {v.unit ?? ''}</strong>
+                <span>{v.measured_at ? formatDateLabel(v.measured_at) : 'Date not recorded'} · page {v.source_page ?? '—'}</span>
+              </div>
+            ))
+          ) : (
+            <Empty text="No vitals extracted yet." />
+          )}
+        </div>
+        <div className="panel">
+          <div className="panel-head">
+            <div>
+              <p className="eyebrow">LAB RESULTS</p>
+              <h3>Latest values</h3>
+            </div>
+            <strong>{labs.length}</strong>
+          </div>
+          {labs.length ? (
+            <div className="lab-list" style={{ maxHeight: '520px', overflowY: 'auto' }}>
+              {labs.map((lab) => (
+                <div className="data-row" key={lab.id} style={{ padding: '8px 0' }}>
+                  <strong>{lab.test_name_raw}: {lab.value_text ?? lab.numeric_value ?? '—'} {lab.unit ?? ''} {lab.reference_range ? `(doc range: ${lab.reference_range})` : ''}</strong>
+                  <span>{lab.measured_at ? formatDateLabel(lab.measured_at) : 'Date not recorded'} · page {lab.source_page ?? '—'}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <Empty text="No blood test reports found in uploaded documents." />
+          )}
+        </div>
+      </div>
+    </Page>
+  )
 }
+
 function TrendChart({ trend, age, sex }: { trend: { name: string; unit: string | null; points: { date: string; value: number }[] }; age: number | null; sex?: string | null }) {
-  const points = [...trend.points].sort((a, b) => a.date.localeCompare(b.date)); const range = generalRange(trend.name, trend.unit, age, sex); const values = points.map((point) => point.value); const min = Math.min(...values, ...(range ? [range[0]] : [])); const max = Math.max(...values, ...(range ? [range[1]] : [])); const padding = Math.max((max - min) * 0.15, 0.1); const low = min - padding; const high = max + padding; const x = (index: number) => 48 + (index * 560) / Math.max(points.length - 1, 1); const y = (value: number) => 205 - ((value - low) / (high - low || 1)) * 165; const line = points.map((point, index) => `${x(index)},${y(point.value)}`).join(' ')
-  return <article className="panel trend-card"><div className="panel-head"><div><p className="eyebrow">TREND</p><h3>{trend.name}</h3></div><span className="muted">{trend.unit ?? ''}</span></div><svg viewBox="0 0 640 240" role="img" aria-label={`${trend.name} over time`} className="trend-svg"><line x1="48" y1="205" x2="608" y2="205" className="chart-axis" />{range && <><rect x="48" y={y(range[1])} width="560" height={Math.max(y(range[0]) - y(range[1]), 1)} className="reference-band" /><text x="52" y={y(range[1]) - 6} className="chart-label">general range {range[0]}–{range[1]}</text></>}<polyline points={line} className="trend-line" />{points.map((point, index) => <g key={`${point.date}-${index}`}><circle cx={x(index)} cy={y(point.value)} r="4" className="trend-dot" /><text x={x(index)} y="224" textAnchor="middle" className="chart-label">{new Date(point.date).toLocaleDateString(undefined, { month: 'short', year: '2-digit' })}</text></g>)}</svg></article>
+  const points = [...trend.points].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+  const range = generalRange(trend.name, trend.unit, age, sex)
+  const values = points.map((point) => point.value)
+  const min = Math.min(...values, ...(range ? [range[0]] : []))
+  const max = Math.max(...values, ...(range ? [range[1]] : []))
+  const padding = Math.max((max - min) * 0.2, 0.5)
+  const low = min - padding
+  const high = max + padding
+  const x = (index: number) => 54 + (index * 530) / Math.max(points.length - 1, 1)
+  const y = (value: number) => 195 - ((value - low) / (high - low || 1)) * 145
+  const line = points.map((point, index) => `${x(index)},${y(point.value)}`).join(' ')
+
+  return (
+    <article className="panel trend-card">
+      <div className="panel-head">
+        <div>
+          <p className="eyebrow">TREND</p>
+          <h3>{trend.name}</h3>
+        </div>
+        <span className="muted">{trend.unit ?? ''}</span>
+      </div>
+      <svg viewBox="0 0 640 240" role="img" aria-label={`${trend.name} over time`} className="trend-svg">
+        <line x1="48" y1="205" x2="608" y2="205" className="chart-axis" />
+        {range && (
+          <>
+            <rect x="48" y={Math.max(y(range[1]), 15)} width="560" height={Math.max(Math.abs(y(range[0]) - y(range[1])), 2)} className="reference-band" />
+            <text x="52" y={Math.max(y(range[1]) - 6, 22)} className="chart-label">general range {range[0]}–{range[1]}</text>
+          </>
+        )}
+        <polyline points={line} className="trend-line" />
+        {points.map((point, index) => (
+          <g key={`${point.date}-${index}`}>
+            <circle cx={x(index)} cy={y(point.value)} r="4.5" className="trend-dot" />
+            <text x={x(index)} y={Math.max(y(point.value) - 9, 15)} textAnchor="middle" style={{ fontSize: '11px', fontWeight: 600, fill: '#1a2e26' }}>
+              {point.value}
+            </text>
+            <text x={x(index)} y="224" textAnchor="middle" className="chart-label">
+              {formatDateLabel(point.date)}
+            </text>
+          </g>
+        ))}
+      </svg>
+    </article>
+  )
 }
 function AskArchivePage({ question, setQuestion, asking, answer, citations, documents, onAsk, onOpenSource }: { question: string; setQuestion: (value: string) => void; asking: boolean; answer: string; citations: Array<{ document_id: string; page_start: number | null; page_end: number | null }>; documents: DocumentRecord[]; onAsk: (event: React.FormEvent) => void; onOpenSource: (documentId: string, page?: number | null) => void }) {
   const suggestions = ['What changed recently?', 'Show repeated lab values', 'What medicines are mentioned?']
