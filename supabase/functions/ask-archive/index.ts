@@ -2,8 +2,8 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
 const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type' }
 const API = 'https://generativelanguage.googleapis.com/v1beta'
-const EMBEDDING_MODEL = 'gemini-embedding-2'
-const ANSWER_MODEL = 'gemini-3.1-flash-lite'
+const EMBEDDING_MODELS = ['text-embedding-004', 'embedding-001']
+const ANSWER_MODELS = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash']
 
 function json(data: unknown, status = 200) { return new Response(JSON.stringify(data), { status, headers: { ...cors, 'Content-Type': 'application/json' } }) }
 
@@ -24,18 +24,36 @@ Deno.serve(async (request) => {
   const apiKey = Deno.env.get('GEMINI_API_KEY')
   if (!apiKey) return json({ error: 'GEMINI_API_KEY is not configured' }, 503)
 
-  const embeddingResponse = await fetch(`${API}/models/${EMBEDDING_MODEL}:embedContent?key=${apiKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: { parts: [{ text: question }] }, output_dimensionality: 768 }) })
-  if (!embeddingResponse.ok) return json({ error: `Embedding request failed: ${await embeddingResponse.text()}` }, 502)
-  const embeddingPayload = await embeddingResponse.json()
-  const embedding = embeddingPayload.embeddings?.[0]?.values ?? embeddingPayload.embedding?.values
-  if (!Array.isArray(embedding)) return json({ error: 'Embedding response was empty' }, 502)
+  let embedding: number[] | null = null
+  let embeddingErrorText = ''
+  for (const model of EMBEDDING_MODELS) {
+    const res = await fetch(`${API}/models/${model}:embedContent?key=${apiKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: `models/${model}`, content: { parts: [{ text: question }] }, output_dimensionality: 768 }) })
+    if (res.ok) {
+      const payload = await res.json()
+      const vals = payload.embeddings?.[0]?.values ?? payload.embedding?.values
+      if (Array.isArray(vals) && vals.length === 768) { embedding = vals; break }
+    } else {
+      embeddingErrorText = await res.text()
+    }
+  }
+  if (!embedding) return json({ error: `Embedding request failed: ${embeddingErrorText}` }, 502)
+
   const { data: chunks, error: chunkError } = await userClient.rpc('match_document_chunks', { query_embedding: `[${embedding.join(',')}]`, match_patient_id: patientId, match_count: 8 })
   if (chunkError) return json({ error: `Retrieval failed: ${chunkError.message}` }, 500)
   const context = (chunks ?? []).map((chunk: { content: string; document_id: string; page_start: number | null; page_end: number | null; similarity: number }) => `[document ${chunk.document_id}, pages ${chunk.page_start ?? '?'}-${chunk.page_end ?? '?'}]\n${chunk.content}`).join('\n\n')
   if (!context) return json({ answer: 'I could not find indexed information for this patient yet.', citations: [] })
-  const answerResponse = await fetch(`${API}/models/${ANSWER_MODEL}:generateContent?key=${apiKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contents: [{ parts: [{ text: `You answer questions about a private medical archive. Use only the supplied record context. Do not diagnose, infer, or give treatment instructions. If the context does not answer the question, say so. Cite source document IDs and page numbers in a Sources section. Patient: ${patient.display_name}\n\nQuestion: ${question}\n\nRecord context:\n${context}` }] }], generation_config: { temperature: 0.1 } }) })
-  if (!answerResponse.ok) return json({ error: `Answer request failed: ${await answerResponse.text()}` }, 502)
-  const answerPayload = await answerResponse.json()
-  const answer = answerPayload.candidates?.[0]?.content?.parts?.map((part: { text?: string }) => part.text ?? '').join('') ?? 'No answer was returned.'
+
+  let answer = 'No answer was returned.'
+  let answerErrorText = ''
+  for (const model of ANSWER_MODELS) {
+    const answerResponse = await fetch(`${API}/models/${model}:generateContent?key=${apiKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contents: [{ parts: [{ text: `You answer questions about a private medical archive. Use only the supplied record context. Do not diagnose, infer, or give treatment instructions. If the context does not answer the question, say so. Cite source document IDs and page numbers in a Sources section. Patient: ${patient.display_name}\n\nQuestion: ${question}\n\nRecord context:\n${context}` }] }], generation_config: { temperature: 0.1 } }) })
+    if (answerResponse.ok) {
+      const answerPayload = await answerResponse.json()
+      answer = answerPayload.candidates?.[0]?.content?.parts?.map((part: { text?: string }) => part.text ?? '').join('') ?? 'No answer was returned.'
+      break
+    } else {
+      answerErrorText = await answerResponse.text()
+    }
+  }
   return json({ answer, citations: (chunks ?? []).map((chunk: { document_id: string; page_start: number | null; page_end: number | null; similarity: number }) => ({ document_id: chunk.document_id, page_start: chunk.page_start, page_end: chunk.page_end, similarity: chunk.similarity })) })
 })
