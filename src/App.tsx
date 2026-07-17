@@ -28,6 +28,9 @@ function App() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [authBusy, setAuthBusy] = useState(false)
+  const [recoveryMode, setRecoveryMode] = useState(false)
+  const [newPassword, setNewPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
   const [notice, setNotice] = useState('')
   const [deletingDocumentId, setDeletingDocumentId] = useState<string | null>(null)
   const [documentErrors, setDocumentErrors] = useState<Record<string, string>>({})
@@ -50,7 +53,7 @@ function App() {
     window.addEventListener('hashchange', onHash)
     if (!supabase) return () => window.removeEventListener('hashchange', onHash)
     supabase.auth.getSession().then(({ data }) => setSessionEmail(data.session?.user.email ?? null))
-    const { data } = supabase.auth.onAuthStateChange((_event, current) => setSessionEmail(current?.user.email ?? null))
+    const { data } = supabase.auth.onAuthStateChange((event, current) => { setSessionEmail(current?.user.email ?? null); if (event === 'PASSWORD_RECOVERY') setRecoveryMode(true) })
     return () => { data.subscription.unsubscribe(); window.removeEventListener('hashchange', onHash) }
   }, [])
 
@@ -119,6 +122,18 @@ function App() {
     const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), { redirectTo: window.location.origin })
     setAuthBusy(false)
     setNotice(error ? error.message : 'Check your email for a password reset link.')
+  }
+
+  async function updatePassword(event: React.FormEvent) {
+    event.preventDefault()
+    if (!supabase || authBusy) return
+    if (newPassword.length < 6) { setNotice('Password must be at least 6 characters.'); return }
+    if (newPassword !== confirmPassword) { setNotice('Passwords do not match.'); return }
+    setAuthBusy(true)
+    const { error } = await supabase.auth.updateUser({ password: newPassword })
+    setAuthBusy(false)
+    if (error) setNotice(error.message)
+    else { setRecoveryMode(false); setNewPassword(''); setConfirmPassword(''); setNotice('Password updated successfully.') }
   }
 
   async function createPatient(event?: React.FormEvent) {
@@ -203,10 +218,12 @@ function App() {
     : <Overview patient={activePatient} documents={documents} vitals={vitals} processingLabel={processingLabel} processingIcon={processingIcon} navigate={navigate} />
 
   const page = activeTab === 'Vitals & labs' ? <VitalsPage labs={labs} vitals={vitals} patient={activePatient} /> : activeTab === 'Ask the archive' ? <AskArchivePage question={question} setQuestion={setQuestion} asking={asking} answer={answer} onAsk={askArchive} /> : legacyPage
+  if (recoveryMode && supabase) return <PasswordRecoveryModal newPassword={newPassword} confirmPassword={confirmPassword} setNewPassword={setNewPassword} setConfirmPassword={setConfirmPassword} authBusy={authBusy} notice={notice} onSubmit={updatePassword} />
 
   return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark"><HeartPulse size={19} /></div><div><strong>Care Archive</strong><span>family health records</span></div></div><div className="side-section"><p className="side-label">WORKSPACE</p>{tabs.map((tab) => <button className={activeTab === tab ? 'side-link active' : 'side-link'} key={tab} onClick={() => navigate(tab)}>{tab === 'Documents' ? <FileText size={16} /> : tab === 'Vitals & labs' ? <Activity size={16} /> : tab === 'Ask the archive' ? <Search size={16} /> : <HeartPulse size={16} />}{tab}</button>)}</div><div className="side-bottom"><div className="privacy"><ShieldCheck size={17} /><span><strong>Private by default</strong><small>Source pages stay attached to every fact.</small></span></div>{sessionEmail && <button className="text-button" onClick={() => supabase?.auth.signOut()}>Sign out</button>}</div></aside><main className="main"><header className="topbar"><div><p className="eyebrow">YOUR ARCHIVE</p><h2>{activeTab}</h2></div><div className="top-actions">{sessionEmail && <span className="account"><UserRound size={15} /> {sessionEmail}</span>}<label className={uploadingFiles ? 'upload-button disabled' : 'upload-button'}><Upload size={16} /> {uploadingFiles ? `Uploading ${uploadProgress}/${uploadTotal}` : 'Upload files'}<input type="file" multiple accept="application/pdf,image/*" onChange={uploadFiles} disabled={uploadingFiles} /></label></div></header><section className="patient-bar"><div><span className="field-label">PATIENT PROFILE</span><select value={selectedPatient} onChange={(e) => setSelectedPatient(e.target.value)}>{displayPatients.map((patient) => <option key={patient.id} value={patient.id}>{patient.display_name}</option>)}</select></div><button className="secondary" onClick={() => { setPatientName(''); setPatientDob(''); setPatientSex(''); setShowProfileForm(true) }} disabled={!supabase}><Plus size={16} /> New profile</button></section>{notice && <div className="notice banner">{notice}</div>}{page}</main>{showProfileForm && supabase && <div className="modal-backdrop"><section className="profile-modal" role="dialog" aria-modal="true"><div className="modal-icon"><UserRound size={20} /></div><p className="eyebrow">WELCOME TO CARE ARCHIVE</p><h2>Who are these records for?</h2><p className="muted">Optional demographics enable more relevant reference bands.</p><form onSubmit={createPatient}><label className="modal-label" htmlFor="patient-name">Patient name</label><input id="patient-name" autoFocus required placeholder="e.g. Mom, Dad, or Priya" value={patientName} onChange={(e) => setPatientName(e.target.value)} /><label className="modal-label" htmlFor="patient-dob">Date of birth (optional)</label><input id="patient-dob" type="date" value={patientDob} onChange={(e) => setPatientDob(e.target.value)} /><label className="modal-label" htmlFor="patient-sex">Sex for reference ranges (optional)</label><select id="patient-sex" value={patientSex} onChange={(e) => setPatientSex(e.target.value)}><option value="">Prefer not to say</option><option value="female">Female</option><option value="male">Male</option><option value="intersex">Intersex</option></select><div className="modal-actions">{patients.length > 0 && <button type="button" className="secondary" onClick={() => setShowProfileForm(false)}>Cancel</button>}<button type="submit" className="primary" disabled={creatingPatient}>{creatingPatient ? 'Creating…' : 'Create profile'}</button></div></form></section></div>}</div>
 }
 
+function PasswordRecoveryModal({ newPassword, confirmPassword, setNewPassword, setConfirmPassword, authBusy, notice, onSubmit }: { newPassword: string; confirmPassword: string; setNewPassword: (value: string) => void; setConfirmPassword: (value: string) => void; authBusy: boolean; notice: string; onSubmit: (event: React.FormEvent) => void }) { return <div className="auth-shell"><section className="auth-card recovery-card"><div className="brand-mark"><HeartPulse size={22} /></div><p className="eyebrow">PASSWORD RESET</p><h1>Choose a new password.</h1><p className="muted">Set a new password for your Care Archive account.</p><form className="login-form" onSubmit={onSubmit}><label htmlFor="new-password">New password</label><input id="new-password" type="password" minLength={6} required autoFocus value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="At least 6 characters" /><label htmlFor="confirm-password">Confirm new password</label><input id="confirm-password" type="password" minLength={6} required value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="Re-enter your password" /><button className="primary full" type="submit" disabled={authBusy}>{authBusy ? 'Updating…' : 'Update password'}</button></form>{notice && <p className="notice">{notice}</p>}</section></div> }
 function Page({ title, eyebrow, children }: { title: string; eyebrow: string; children: React.ReactNode }) { return <section className="page"><div className="page-intro"><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p className="muted">{title === 'Document library' ? 'Review upload status and source files.' : 'Everything extracted from the selected patient profile.'}</p></div>{children}</section> }
 function Empty({ text }: { text: string }) { return <div className="empty"><FileText size={23} /><strong>Nothing here yet</strong><span>{text}</span></div> }
 function testKey(name: string) { return name.toLowerCase().replace(/\[[^\]]*\]/g, '').replace(/\s+in\s+.*/g, '').replace(/[^a-z0-9]+/g, ' ').trim() }
