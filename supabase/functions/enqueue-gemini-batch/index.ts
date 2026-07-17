@@ -85,7 +85,15 @@ function contentClassification(value: unknown): string {
 function dateOnly(value: unknown): string | null {
   if (typeof value !== 'string' || !value) return null
   const match = value.match(/^\d{4}-\d{2}-\d{2}/)
-  return match?.[0] ?? null
+  if (match) return match[0]
+  const short = value.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2}|\d{4})/)
+  if (!short) return null
+  const first = Number(short[1]); const second = Number(short[2]); const year = Number(short[3].length === 2 ? `20${short[3]}` : short[3])
+  // The archive is configured for Indian records, so slash dates default to DD/MM/YY.
+  const day = first
+  const month = second
+  if (day < 1 || day > 31 || month < 1 || month > 12) return null
+  return `${year.toString().padStart(4, '0')}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`
 }
 
 function dateTime(value: unknown): string | null {
