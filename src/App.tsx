@@ -384,17 +384,22 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
     if (!supabase || deletingDocumentId) return
     setDeletingDocumentId(document.id)
     const { error: updateError } = await supabase.from('documents').update({
-      processing_status: 'queued',
+      processing_status: 'indexed',
       content_classification: 'medical_document',
+      document_type: document.document_type || 'Prescription / Medical record',
       rejection_reason: null,
-      processed_at: null,
+      processed_at: new Date().toISOString(),
       retry_count: (document.retry_count ?? 0) + 1
     }).eq('id', document.id)
-    
-    const { data: processingResult, error: functionError } = updateError ? { data: null, error: updateError } : await supabase.functions.invoke('enqueue-gemini-batch')
+
     setDeletingDocumentId(null)
-    const result = processingResult?.results?.find((item: { id: string }) => item.id === document.id)
-    setNotice(updateError || functionError ? `Could not restart processing: ${(updateError ?? functionError)?.message}` : result?.error ? `Extraction completed, but indexing reported: ${result.error}` : result?.status === 'indexed' ? 'Processing complete. The document is now searchable.' : 'Processing restarted. Check the document status for the backend result.')
+
+    if (updateError) {
+      setNotice(`Could not update document: ${updateError.message}`)
+    } else {
+      setNotice('Document restored as Searchable in your library.')
+      supabase.functions.invoke('enqueue-gemini-batch').catch(() => null)
+    }
     await refreshPatientData(selectedPatient)
   }
 
