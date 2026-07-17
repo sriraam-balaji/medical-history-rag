@@ -169,6 +169,21 @@ function App() {
     else if (data) { setPatients((current) => [...current, data as PatientProfile]); setSelectedPatient(data.id); setPatientName(''); setPatientDob(''); setPatientSex(''); setShowProfileForm(false); setNotice('Patient profile created.') }
   }
 
+function readFileAsArrayBuffer(file: Blob | File): Promise<ArrayBuffer> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      if (reader.result instanceof ArrayBuffer) {
+        resolve(reader.result)
+      } else {
+        reject(new Error('FileReader returned invalid result'))
+      }
+    }
+    reader.onerror = () => reject(reader.error || new Error('FileReader failed to read file'))
+    reader.readAsArrayBuffer(file)
+  })
+}
+
 async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentType: string; name: string }> {
   const lowerName = file.name.toLowerCase()
   const isPdf = lowerName.endsWith('.pdf') || file.type === 'application/pdf' || file.type === 'application/x-pdf' || file.type.includes('pdf')
@@ -179,11 +194,11 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
       name = `${name}.pdf`
     }
     try {
-      const buffer = await file.arrayBuffer()
-      const blob = new Blob([buffer], { type: 'application/pdf' })
+      const buffer = await readFileAsArrayBuffer(file)
+      const blob = new Blob([new Uint8Array(buffer)], { type: 'application/pdf' })
       return { blob, contentType: 'application/pdf', name }
     } catch (err) {
-      console.warn('PDF arrayBuffer read fallback:', err)
+      console.warn('PDF FileReader error:', err)
       return { blob: file, contentType: 'application/pdf', name }
     }
   }
@@ -221,9 +236,9 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
   }
   
   try {
-    const buffer = await file.arrayBuffer()
+    const buffer = await readFileAsArrayBuffer(file)
     const contentType = file.type || (file.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg')
-    return { blob: new Blob([buffer], { type: contentType }), contentType, name: file.name }
+    return { blob: new Blob([new Uint8Array(buffer)], { type: contentType }), contentType, name: file.name }
   } catch {
     return { blob: file, contentType: file.type || 'image/jpeg', name: file.name }
   }
@@ -242,6 +257,13 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
     )
     if (allowed.length !== files.length) { setNotice('Only PDF files and images (JPG, PNG, WEBP, or HEIC) can be uploaded.'); return }
     setUploadingFiles(true); setUploadProgress(0); setUploadTotal(files.length); setNotice(`Selected ${files.length} file${files.length === 1 ? '' : 's'}. Processing & uploading…`)
+    
+    try {
+      await supabase.auth.getSession()
+    } catch (sessionErr) {
+      console.warn('Auth session check notice:', sessionErr)
+    }
+
     let done = 0
     let uploadedCount = 0
     const uploadErrors: string[] = []
@@ -251,6 +273,7 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
       const safeName = prepared.name.replace(/[^a-zA-Z0-9_.-]/g, '_')
       const path = `${selectedPatient}/${id}/${safeName}`
       let upload: { error: { message: string } | null } = { error: null }
+      
       for (let attempt = 1; attempt <= 3; attempt += 1) {
         try {
           const result = await supabase.storage.from('medical-documents').upload(path, prepared.blob, {
@@ -259,14 +282,34 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
             cacheControl: '3600',
           })
           if (result.error) {
-            console.error('Supabase Storage Error:', result.error)
-            upload = { error: { message: result.error.message } }
+            console.warn('Standard upload failed, trying signed upload URL fallback:', result.error)
+            const { data: signedData } = await supabase.storage.from('medical-documents').createSignedUploadUrl(path)
+            if (signedData?.token) {
+              const signedResult = await supabase.storage.from('medical-documents').uploadToSignedUrl(path, signedData.token, prepared.blob, {
+                contentType: prepared.contentType,
+              })
+              upload = { error: signedResult.error ? { message: signedResult.error.message } : null }
+            } else {
+              upload = { error: { message: result.error.message } }
+            }
           } else {
             upload = { error: null }
           }
         } catch (err: any) {
-          console.error('Fetch exception during upload:', err)
-          upload = { error: { message: err?.message || 'Network fetch error' } }
+          console.warn('Upload fetch exception, trying signed upload URL fallback:', err)
+          try {
+            const { data: signedData } = await supabase.storage.from('medical-documents').createSignedUploadUrl(path)
+            if (signedData?.token) {
+              const signedResult = await supabase.storage.from('medical-documents').uploadToSignedUrl(path, signedData.token, prepared.blob, {
+                contentType: prepared.contentType,
+              })
+              upload = { error: signedResult.error ? { message: signedResult.error.message } : null }
+            } else {
+              upload = { error: { message: err?.message || 'Network fetch error' } }
+            }
+          } catch (signedErr: any) {
+            upload = { error: { message: signedErr?.message || err?.message || 'Network fetch error' } }
+          }
         }
         if (!upload.error) break
         if (attempt < 3) await new Promise((resolve) => window.setTimeout(resolve, 900 * attempt))
