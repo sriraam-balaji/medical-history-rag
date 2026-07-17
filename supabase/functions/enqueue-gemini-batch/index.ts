@@ -228,16 +228,22 @@ function dateTime(value: unknown): string | null {
   return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString()
 }
 
-async function embedText(text: string, apiKey: string): Promise<number[]> {
-  const response = await fetch(`${GEMINI}/models/${EMBEDDING_MODEL}:embedContent?key=${apiKey}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: `models/${EMBEDDING_MODEL}`, content: { parts: [{ text }] }, output_dimensionality: 768 }),
-  })
-  if (!response.ok) throw new Error(`Embedding request failed: ${await response.text()}`)
-  const result = await response.json()
-  const values = result.embeddings?.[0]?.values ?? result.embedding?.values
-  if (!Array.isArray(values) || values.length !== 768) throw new Error(`Unexpected embedding dimensions: ${values?.length ?? 0}`)
-  return values
+async function embedText(text: string, apiKey: string): Promise<{ values: number[]; model: string }> {
+  let lastErrorText = ''
+  for (const model of EMBEDDING_MODELS) {
+    const response = await fetch(`${GEMINI}/models/${model}:embedContent?key=${apiKey}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: `models/${model}`, content: { parts: [{ text }] }, output_dimensionality: 768 }),
+    })
+    if (response.ok) {
+      const result = await response.json()
+      const values = result.embeddings?.[0]?.values ?? result.embedding?.values
+      if (Array.isArray(values) && values.length === 768) return { values, model }
+    } else {
+      lastErrorText = await response.text()
+    }
+  }
+  throw new Error(`Embedding request failed across models: ${lastErrorText}`)
 }
 
 async function indexExtraction(service: ReturnType<typeof createClient>, document: any, extracted: unknown, apiKey: string) {
@@ -277,8 +283,8 @@ async function indexExtraction(service: ReturnType<typeof createClient>, documen
   const chunks = serialized.match(/.{1,5000}/gs) ?? [serialized]
   requireDb(await service.from('document_chunks').delete().eq('document_id', document.id), 'Clear document chunks')
   for (let index = 0; index < chunks.length; index++) {
-    const embedding = await embedText(chunks[index], apiKey)
-    requireDb(await service.from('document_chunks').insert({ patient_id: document.patient_id, document_id: document.id, chunk_index: index, content: chunks[index], embedding: `[${embedding.join(',')}]`, metadata: { source: 'gemini-embedding-2', model_version: EMBEDDING_MODEL } }), 'Insert document chunk')
+    const { values: embedding, model: embeddingModel } = await embedText(chunks[index], apiKey)
+    requireDb(await service.from('document_chunks').insert({ patient_id: document.patient_id, document_id: document.id, chunk_index: index, content: chunks[index], embedding: `[${embedding.join(',')}]`, metadata: { source: embeddingModel, model_version: embeddingModel } }), 'Insert document chunk')
   }
 }
 
