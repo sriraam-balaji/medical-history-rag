@@ -14,3 +14,8 @@ Backend secrets (`SUPABASE_SERVICE_ROLE_KEY`, `GEMINI_API_KEY`, and `GEMINI_WEBH
 ## Current milestone
 
 The repository includes the responsive dashboard shell, email magic-link authentication, patient-profile creation, private file upload UI, database schema, RLS foundation, and automated batch submission/webhook function foundations. The result parser and embeddings worker are the next implementation layer.
+
+## Deployment
+
+Configured for static deployment on **Cloudflare Pages** or **Vercel** with SPA routing (`public/_redirects`).
+
