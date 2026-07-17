@@ -16,6 +16,7 @@ function App() {
   const [medicines, setMedicines] = useState<Medication[]>([])
   const [activeTab, setActiveTab] = useState(() => tabFromHash())
   const [showLogin, setShowLogin] = useState(false)
+  const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin')
   const [showProfileForm, setShowProfileForm] = useState(false)
   const [patientName, setPatientName] = useState('')
   const [patientDob, setPatientDob] = useState('')
@@ -25,6 +26,8 @@ function App() {
   const [uploadProgress, setUploadProgress] = useState(0)
   const [uploadTotal, setUploadTotal] = useState(0)
   const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [authBusy, setAuthBusy] = useState(false)
   const [notice, setNotice] = useState('')
   const [deletingDocumentId, setDeletingDocumentId] = useState<string | null>(null)
   const [documentErrors, setDocumentErrors] = useState<Record<string, string>>({})
@@ -88,10 +91,24 @@ function App() {
     else { setPatients((data ?? []) as PatientProfile[]); if (data?.[0]) setSelectedPatient(data[0].id); else setShowProfileForm(true) }
   }
 
-  async function sendMagicLink(event: React.FormEvent) {
-    event.preventDefault(); if (!supabase) return
-    const { error } = await supabase.auth.signInWithOtp({ email, options: { emailRedirectTo: window.location.origin } })
-    setNotice(error ? error.message : 'Check your email for the secure sign-in link.'); if (!error) setShowLogin(false)
+  async function submitAuth(event: React.FormEvent) {
+    event.preventDefault(); if (!supabase || authBusy) return
+    setAuthBusy(true); setNotice('')
+    const result = authMode === 'signup'
+      ? await supabase.auth.signUp({ email: email.trim(), password })
+      : await supabase.auth.signInWithPassword({ email: email.trim(), password })
+    setAuthBusy(false)
+    if (result.error) setNotice(result.error.message)
+    else if (authMode === 'signup' && !result.data.session) setNotice('Account created. Check your email to confirm your address, then sign in.')
+    else { setNotice('Signed in.'); setShowLogin(false); setPassword('') }
+  }
+
+  async function resetPassword() {
+    if (!supabase || !email.trim() || authBusy) { setNotice('Enter your email address first.'); return }
+    setAuthBusy(true)
+    const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), { redirectTo: window.location.origin })
+    setAuthBusy(false)
+    setNotice(error ? error.message : 'Check your email for a password reset link.')
   }
 
   async function createPatient(event?: React.FormEvent) {
@@ -166,7 +183,7 @@ function App() {
   const activePatient = useMemo(() => patients.find((p) => p.id === selectedPatient), [patients, selectedPatient])
   const displayPatients = supabaseConfigured ? patients : demoPatients
 
-  if (!sessionEmail && supabaseConfigured) return <div className="auth-shell"><div className="auth-card"><div className="brand-mark"><HeartPulse size={22} /></div><p className="eyebrow">PRIVATE HEALTH ARCHIVE</p><h1>Keep the record together.</h1><p className="muted">A secure family workspace for documents, medicines, vitals, and timelines.</p><button className="primary full" onClick={() => setShowLogin(true)}><LogIn size={17} /> Sign in with email</button><p className="tiny">Each account only sees its own patient profiles.</p>{showLogin && <form className="login-form" onSubmit={sendMagicLink}><input type="email" required placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} /><button className="primary full" type="submit">Send secure link</button></form>}{notice && <p className="notice">{notice}</p>}</div></div>
+  if (!sessionEmail && supabaseConfigured) return <div className="auth-shell"><div className="auth-card"><div className="brand-mark"><HeartPulse size={22} /></div><p className="eyebrow">PRIVATE HEALTH ARCHIVE</p><h1>Keep the record together.</h1><p className="muted">A secure family workspace for documents, medicines, vitals, and timelines.</p><button className="primary full" onClick={() => setShowLogin(true)}><LogIn size={17} /> {showLogin ? (authMode === 'signup' ? 'Create account' : 'Sign in') : 'Sign in or create account'}</button><p className="tiny">Each account only sees its own patient profiles.</p>{showLogin && <form className="login-form" onSubmit={submitAuth}><input type="email" required autoComplete="email" placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} /><input type="password" required minLength={6} autoComplete={authMode === 'signup' ? 'new-password' : 'current-password'} placeholder="Password (at least 6 characters)" value={password} onChange={(e) => setPassword(e.target.value)} /><button className="primary full" type="submit" disabled={authBusy}>{authBusy ? 'Please wait…' : authMode === 'signup' ? 'Create account' : 'Sign in'}</button><div className="auth-links"><button type="button" className="text-button" onClick={() => { setAuthMode(authMode === 'signup' ? 'signin' : 'signup'); setNotice('') }}>{authMode === 'signup' ? 'Already have an account? Sign in' : 'New here? Create an account'}</button>{authMode === 'signin' && <button type="button" className="text-button" onClick={resetPassword} disabled={authBusy}>Forgot password?</button>}</div></form>}{notice && <p className="notice">{notice}</p>}</div></div>
 
   const documentList = <div className="document-list">{documents.map((doc) => <div className="document-row" key={doc.id}><div className="file-icon"><FileText size={17} /></div><div className="document-name"><strong>{doc.original_filename}</strong><span>{documentErrors[doc.id] ? 'Indexing needs retry' : doc.document_type ?? 'Awaiting classification'}</span></div><span className={`status ${doc.processing_status}`} title={documentErrors[doc.id]}>{processingIcon(doc.processing_status)} {documentErrors[doc.id] ? 'Needs retry' : processingLabel(doc.processing_status)}</span>{(doc.processing_status !== 'indexed' || documentErrors[doc.id]) && <button className="retry-button" onClick={() => retryDocument(doc)} disabled={deletingDocumentId === doc.id} aria-label="Retry processing" title="Retry processing"><RefreshCw size={14} /></button>}<button className="delete-button" onClick={() => deleteDocument(doc)} disabled={deletingDocumentId === doc.id} aria-label={`Delete ${doc.original_filename}`} title="Delete document">{deletingDocumentId === doc.id ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}</button></div>)}</div>
   const legacyPage = activeTab === 'Documents' ? <Page title="Document library" eyebrow="YOUR RECORDS"><div className="panel full-panel"><div className="panel-head"><div><p className="eyebrow">SOURCE FILES</p><h3>Every uploaded record</h3></div><span className="muted">{documents.length} file{documents.length === 1 ? '' : 's'}</span></div>{documents.length ? documentList : <Empty text="Upload a PDF or a clear photo of a medical page." />}</div></Page>
