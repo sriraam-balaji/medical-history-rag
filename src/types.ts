@@ -12,6 +12,8 @@ export type DocumentRecord = {
   original_filename: string
   storage_path: string
   document_type: string | null
+  content_classification?: string | null
+  rejection_reason?: string | null
   processing_status: string
   created_at: string
 }
@@ -23,6 +25,21 @@ export type Vital = {
   value: number
   unit: string | null
   source_page: number | null
+}
+
+export type MedicalEvent = {
+  id: string
+  patient_id: string
+  event_date: string | null
+  event_type: string
+  title: string
+  summary: string | null
+  doctor_name: string | null
+  specialty: string | null
+  facility: string | null
+  visit_reason: string | null
+  source_page: number | null
+  source_document_id: string | null
 }
 
 export type LabResult = {

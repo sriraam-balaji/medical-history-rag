@@ -4,7 +4,7 @@ const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers
 const GEMINI = 'https://generativelanguage.googleapis.com/v1beta'
 const GEMINI_UPLOAD = 'https://generativelanguage.googleapis.com/upload/v1beta/files'
 const MODEL = 'gemini-3.1-flash-lite'
-const PROMPT = 'Extract this historical medical document into JSON. Preserve exact dates, values, units, medicine instructions, uncertainty, and page references. Never infer missing facts. Distinguish prescribed, reported_taking, stopped, changed, completed, and unknown. Return JSON only.'
+const PROMPT = `Classify and extract this historical document into JSON. This archive accepts medical records only. Set content_classification to exactly one of medical_document, non_medical, or uncertain. A medical_document must contain patient-care information such as a clinical report, prescription, lab result, imaging report, discharge summary, consultation note, vaccination record, medical bill, or hospital document. Do not classify a document as medical merely because it contains a person or date. For medical_document, extract exact dates, values, units, medicine instructions, uncertainty, and page references. Never infer missing facts. Distinguish prescribed, reported_taking, stopped, changed, completed, and unknown. Extract visits or appointments with doctor_name, specialty, facility, visit_reason, date, type, and page. Return JSON only.`
 const EMBEDDING_MODEL = 'gemini-embedding-2'
 const ENABLE_BATCH_API = Deno.env.get('ENABLE_GEMINI_BATCH') === 'true'
 
@@ -77,6 +77,11 @@ function asObject(value: unknown): Record<string, any> {
 
 function asArray(value: unknown): any[] { return Array.isArray(value) ? value : [] }
 
+function contentClassification(value: unknown): string {
+  const root = asObject(value)
+  return String(root.content_classification ?? root.document_classification ?? root.classification ?? '').toLowerCase()
+}
+
 function dateOnly(value: unknown): string | null {
   if (typeof value !== 'string' || !value) return null
   const match = value.match(/^\d{4}-\d{2}-\d{2}/)
@@ -117,7 +122,8 @@ async function indexExtraction(service: ReturnType<typeof createClient>, documen
     return Number.isFinite(value) ? [{ patient_id: document.patient_id, vital_type: String(v.type ?? v.name ?? 'Vital'), value, unit: v.unit ?? null, measured_at: dateTime(v.date ?? v.measured_at), source_document_id: document.id, source_page: v.page ?? null, evidence: JSON.stringify(v), confidence: 0.8 }] : []
   })
   const medications = asArray(patient.medications ?? root.medications ?? root.medicines).map((m) => ({ patient_id: document.patient_id, brand_name: m.brand_name ?? m.name ?? null, generic_name: m.generic_name ?? m.ingredient ?? null, strength: m.strength ?? m.dose ?? null, dosage_form: m.dosage_form ?? null, route: m.route ?? null, manufacturer: m.manufacturer ?? null, composition_status: m.composition_status ?? 'unknown', source_document_id: document.id, source_page: m.page ?? null, confidence: 0.8 }))
-  const events = [...asArray(patient.appointments ?? root.appointments).map((e) => ({ event_date: dateOnly(e.date), event_type: 'appointment', title: String(e.type ?? 'Appointment'), summary: e.reason ?? null, source_page: e.page ?? null, evidence: JSON.stringify(e) })), ...asArray(patient.procedures ?? root.procedures).map((e) => ({ event_date: dateOnly(e.date), event_type: 'procedure', title: String(e.name ?? 'Procedure'), summary: e.status ?? null, source_page: e.page ?? null, evidence: JSON.stringify(e) }))].map((e) => ({ ...e, patient_id: document.patient_id, source_document_id: document.id, confidence: 0.85 }))
+  const visits = asArray(patient.visits ?? root.visits ?? patient.appointments ?? root.appointments)
+  const events = [...visits.map((e) => ({ event_date: dateOnly(e.date ?? e.visit_date), event_type: 'appointment', title: String(e.type ?? e.visit_type ?? 'Appointment'), summary: e.reason ?? e.visit_reason ?? null, doctor_name: e.doctor_name ?? e.doctor ?? e.physician ?? null, specialty: e.specialty ?? e.department ?? null, facility: e.facility ?? e.hospital ?? e.clinic ?? null, visit_reason: e.reason ?? e.visit_reason ?? null, source_page: e.page ?? null, evidence: JSON.stringify(e) })), ...asArray(patient.procedures ?? root.procedures).map((e) => ({ event_date: dateOnly(e.date), event_type: 'procedure', title: String(e.name ?? 'Procedure'), summary: e.status ?? null, doctor_name: e.doctor_name ?? e.doctor ?? null, specialty: e.specialty ?? null, facility: e.facility ?? e.hospital ?? null, visit_reason: null, source_page: e.page ?? null, evidence: JSON.stringify(e) }))].map((e) => ({ ...e, patient_id: document.patient_id, source_document_id: document.id, confidence: 0.85 }))
 
   for (const table of ['medical_events', 'medications', 'vitals', 'lab_results']) requireDb(await service.from(table).delete().eq('source_document_id', document.id), `Clear ${table}`)
   if (events.length) requireDb(await service.from('medical_events').insert(events), 'Insert medical events')
@@ -149,7 +155,7 @@ Deno.serve(async (request) => {
   const geminiKey = Deno.env.get('GEMINI_API_KEY')
   if (!geminiKey) return json({ error: 'GEMINI_API_KEY is not configured' }, 503)
 
-  const uploadedFiles: Array<{ id: string; patient_id: string; uri: string; mimeType: string }> = []
+  const uploadedFiles: Array<{ id: string; patient_id: string; storage_path: string; uri: string; mimeType: string }> = []
   for (const document of documents) {
     try {
       const claimed = await service.from('documents').update({ processing_status: 'processing' }).eq('id', document.id).eq('processing_status', 'queued').select('id').maybeSingle()
@@ -162,7 +168,7 @@ Deno.serve(async (request) => {
       const bytes = new Uint8Array(await source.arrayBuffer())
       const mimeType = mimeTypeFor(document.original_filename)
       const uploaded = await uploadGeminiFile(bytes, mimeType, document.original_filename, geminiKey)
-      uploadedFiles.push({ id: document.id, patient_id: document.patient_id, uri: uploaded.uri, mimeType })
+      uploadedFiles.push({ id: document.id, patient_id: document.patient_id, storage_path: document.storage_path, uri: uploaded.uri, mimeType })
     } catch (error) {
       await recordFailure(service, document.id, String(error))
     }
@@ -185,14 +191,21 @@ Deno.serve(async (request) => {
       let fallback: { output: unknown; validated: unknown } | null = null
       try {
         fallback = await runNormalFallback(file.uri, file.mimeType, geminiKey)
+        const classification = contentClassification(fallback.validated)
+        if (classification !== 'medical_document') throw new Error(`NonMedicalDocument: Gemini classified this upload as ${classification || 'uncertain'}. Only medical records are accepted.`)
         await indexExtraction(service, file, fallback.validated, geminiKey)
         await service.from('extraction_jobs').delete().eq('document_id', file.id)
         requireDb(await service.from('extraction_jobs').insert({ document_id: file.id, status: 'indexed', raw_output: fallback.output, validated_output: fallback.validated, model_version: MODEL, prompt_version: 'v1-fallback', schema_version: 'v1' }), 'Save extraction job')
-        requireDb(await service.from('documents').update({ processing_status: 'indexed', processed_at: new Date().toISOString() }).eq('id', file.id), 'Mark document indexed')
+        requireDb(await service.from('documents').update({ processing_status: 'indexed', content_classification: 'medical_document', rejection_reason: null, processed_at: new Date().toISOString() }).eq('id', file.id), 'Mark document indexed')
         fallbackResults.push({ id: file.id, status: 'indexed', embedding_model: EMBEDDING_MODEL })
       } catch (fallbackError) {
         const errorMessage = String(fallbackError)
-        if (fallback) {
+        if (errorMessage.includes('NonMedicalDocument:')) {
+          await service.storage.from('medical-documents').remove([file.storage_path])
+          await service.from('documents').update({ processing_status: 'failed_permanent', content_classification: 'non_medical', rejection_reason: errorMessage.replace('Error: NonMedicalDocument: ', '') }).eq('id', file.id)
+          await service.from('extraction_jobs').delete().eq('document_id', file.id)
+          fallbackResults.push({ id: file.id, status: 'rejected_non_medical', error: errorMessage.replace('Error: NonMedicalDocument: ', '') })
+        } else if (fallback) {
           await service.from('extraction_jobs').delete().eq('document_id', file.id)
           await service.from('extraction_jobs').insert({ document_id: file.id, status: 'validated', raw_output: fallback.output, validated_output: fallback.validated, model_version: MODEL, prompt_version: 'v1-fallback', schema_version: 'v1', error_message: errorMessage })
           await service.from('documents').update({ processing_status: 'validated', processed_at: new Date().toISOString() }).eq('id', file.id)
