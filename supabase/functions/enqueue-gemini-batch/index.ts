@@ -362,6 +362,31 @@ async function indexExtraction(service: ReturnType<typeof createClient>, documen
     }))
   ].map((e) => ({ ...e, patient_id: document.patient_id, source_document_id: document.id }))
 
+  // Extract distinct document dates from multi-page records as individual consultation events
+  const documentDates = asArray(root.document_dates)
+  for (const dateItem of documentDates) {
+    const rawVal = typeof dateItem === 'object' && dateItem ? (dateItem.date ?? dateItem.raw_date) : String(dateItem)
+    const parsedDate = dateOnly(rawVal)
+    const pageNum = typeof dateItem === 'object' && dateItem && typeof dateItem.page === 'number' ? dateItem.page : 1
+    if (parsedDate && !events.some((e) => e.event_date === parsedDate)) {
+      events.push({
+        patient_id: document.patient_id,
+        source_document_id: document.id,
+        event_date: parsedDate,
+        event_type: 'consultation',
+        title: provider.facility_name ? `Visit at ${provider.facility_name}` : (provider.doctor_name ? `Consultation with ${provider.doctor_name}` : 'Doctor Consultation'),
+        summary: dateItem.raw_date ? `Prescription / Report dated ${dateItem.raw_date}` : 'Extracted visit date',
+        doctor_name: provider.doctor_name ?? root.doctor_name ?? null,
+        specialty: provider.specialty ?? root.specialty ?? null,
+        facility: provider.facility_name ?? root.facility ?? null,
+        visit_reason: null,
+        source_page: pageNum,
+        evidence: JSON.stringify(dateItem),
+        confidence: 0.9,
+      })
+    }
+  }
+
   const consultationDate = dateOnly(root.date ?? root.visit_date ?? root.consultation_date)
   const consultationFacility = provider.facility_name ?? root.facility ?? root.hospital ?? root.clinic ?? null
   const consultationDoctor = provider.doctor_name ?? root.doctor_name ?? root.doctor ?? null
@@ -382,6 +407,13 @@ async function indexExtraction(service: ReturnType<typeof createClient>, documen
       confidence: 0.85,
     })
   }
+
+  // Sort events chronologically (newest first)
+  events.sort((a, b) => {
+    if (!a.event_date) return 1
+    if (!b.event_date) return -1
+    return b.event_date.localeCompare(a.event_date)
+  })
 
   // 3. Delete existing records for this document to ensure clean idempotent overwrite
   for (const table of ['medical_events', 'medications', 'vitals', 'lab_results']) {
