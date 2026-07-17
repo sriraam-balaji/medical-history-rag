@@ -366,6 +366,10 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
 
   async function retryDocument(document: DocumentRecord) {
     if (!supabase || deletingDocumentId) return
+    if ((document.retry_count ?? 0) >= 1) {
+      setNotice('This document has reached its 1 allowed retry limit.')
+      return
+    }
     setDeletingDocumentId(document.id)
     const { error: updateError } = await supabase.from('documents').update({
       processing_status: 'queued',
@@ -385,7 +389,7 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
     const { data: processingResult, error: functionError } = await supabase.functions.invoke('enqueue-gemini-batch').catch((err) => ({ data: null, error: err }))
     setDeletingDocumentId(null)
     if (functionError) {
-      setNotice('Extraction queued! Gemini backend is processing your medical document.')
+      setNotice('Document queued! Gemini backend is parsing doctor notes and labs.')
     } else {
       setNotice('Extraction completed! Check Medicines, Vitals & Labs, and Care Timeline.')
     }
@@ -420,7 +424,7 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
   if (recoveryMode && supabase) return <PasswordRecoveryModal newPassword={newPassword} confirmPassword={confirmPassword} setNewPassword={setNewPassword} setConfirmPassword={setConfirmPassword} authBusy={authBusy} notice={notice} onSubmit={updatePassword} />
   if (!sessionEmail) return <div className="auth-shell"><div className="auth-card"><div className="brand-mark"><HeartPulse size={22} /></div><p className="eyebrow">PRIVATE HEALTH ARCHIVE</p><h1>Keep the record together.</h1><p className="muted">A secure family workspace for documents, medicines, vitals, and timelines.</p>{!showLogin && <button className="primary full" onClick={() => setShowLogin(true)}><LogIn size={17} /> Sign in or create account</button>}<p className="tiny">Each account only sees its own patient profiles.</p>{showLogin && <form className="login-form" onSubmit={submitAuth}><div className="auth-mode"><button type="button" className={authMode === 'signin' ? 'selected' : ''} onClick={() => { setAuthMode('signin'); setNotice('') }}>Sign in</button><button type="button" className={authMode === 'signup' ? 'selected' : ''} onClick={() => { setAuthMode('signup'); setNotice('') }}>Create account</button></div><label htmlFor="auth-email">Email address</label><input id="auth-email" type="email" required autoComplete="email" placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} /><label htmlFor="auth-password">Password</label><input id="auth-password" type="password" required minLength={6} autoComplete={authMode === 'signup' ? 'new-password' : 'current-password'} placeholder="At least 6 characters" value={password} onChange={(e) => setPassword(e.target.value)} /><button className="primary full" type="submit" disabled={authBusy}>{authBusy ? 'Please wait…' : authMode === 'signup' ? 'Create account' : 'Sign in'}</button><div className="auth-links"><button type="button" className="text-button" onClick={() => { setAuthMode(authMode === 'signup' ? 'signin' : 'signup'); setNotice('') }}>{authMode === 'signup' ? 'Already have an account? Sign in' : 'New here? Create an account'}</button>{authMode === 'signin' && <button type="button" className="text-button" onClick={resetPassword} disabled={authBusy}>Forgot password?</button>}</div></form>}{notice && <p className="notice">{notice}</p>}</div></div>
 
-  const documentList = <div className="document-list">{documents.map((doc) => <div className="document-row" key={doc.id}><div className="file-icon"><FileText size={17} /></div><div className="document-name"><strong>{doc.original_filename}</strong><span>{doc.document_type || (doc.processing_status === 'indexed' ? 'Prescription / Medical record' : 'Processing document')}</span></div><span className={`status ${doc.processing_status}`}>{processingIcon(doc.processing_status)} {processingLabel(doc.processing_status)}</span>{(doc.processing_status !== 'indexed') && <button className="retry-button" onClick={() => retryDocument(doc)} disabled={deletingDocumentId === doc.id} aria-label="Retry processing" title="Retry processing"><RefreshCw size={14} /></button>}<button className="delete-button" onClick={() => deleteDocument(doc)} disabled={deletingDocumentId === doc.id} aria-label={`Delete ${doc.original_filename}`} title="Delete document">{deletingDocumentId === doc.id ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}</button></div>)}</div>
+  const documentList = <div className="document-list">{documents.map((doc) => <div className="document-row" key={doc.id}><div className="file-icon"><FileText size={17} /></div><div className="document-name"><strong>{doc.original_filename}</strong><span>{doc.document_type || (doc.processing_status === 'indexed' ? 'Prescription / Medical record' : 'Processing document')}</span></div><span className={`status ${doc.processing_status}`}>{processingIcon(doc.processing_status)} {processingLabel(doc.processing_status)}</span>{(doc.processing_status !== 'indexed') && (doc.retry_count ?? 0) < 1 && <button className="retry-button" onClick={() => retryDocument(doc)} disabled={deletingDocumentId === doc.id} aria-label="Retry processing" title="Retry processing"><RefreshCw size={14} /></button>}<button className="delete-button" onClick={() => deleteDocument(doc)} disabled={deletingDocumentId === doc.id} aria-label={`Delete ${doc.original_filename}`} title="Delete document">{deletingDocumentId === doc.id ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}</button></div>)}</div>
   const legacyPage = activeTab === 'Documents' ? <Page title="Document library" eyebrow="YOUR RECORDS"><div className="panel full-panel"><div className="panel-head"><div><p className="eyebrow">SOURCE FILES</p><h3>Every uploaded record</h3></div><span className="muted">{documents.length} file{documents.length === 1 ? '' : 's'}</span></div>{documents.length ? documentList : <Empty text="Upload a PDF or a clear photo of a medical page." />}</div></Page>
     : activeTab === 'Medicines' ? <Page title="Medicines" eyebrow="MEDICATION HISTORY"><div className="panel full-panel"><div className="panel-head"><div><p className="eyebrow">EXTRACTED MEDICINES</p><h3>Prescribed or mentioned</h3></div></div>{medicines.length ? medicines.map((med) => <div className="data-row" key={med.id}><strong>{med.brand_name || med.generic_name || 'Unnamed medicine'}</strong><span>{[med.generic_name, med.strength, med.dosage_form, med.route].filter(Boolean).join(' · ') || 'Details pending'}</span></div>) : <Empty text="Medicines will appear here when the extraction pipeline finds them." />}</div></Page>
     : activeTab === 'Doctors & visits' ? <VisitPage events={events} />
@@ -469,6 +473,93 @@ function AskArchivePage({ question, setQuestion, asking, answer, citations, onAs
   const suggestions = ['What changed recently?', 'Show repeated lab values', 'What medicines are mentioned?']
   return <Page title="Ask the archive" eyebrow="CITED SEARCH"><div className="panel full-panel ask-panel"><div className="ask-heading"><div className="ask-icon"><Search size={24} /></div><div><h3>Search across this patient’s records</h3><p className="muted">Answers use indexed records, source pages, and only the selected patient’s data.</p></div></div><div className="suggestion-row">{suggestions.map((suggestion) => <button key={suggestion} type="button" className="suggestion" onClick={() => setQuestion(suggestion)}>{suggestion}</button>)}</div><form className="ask-placeholder" onSubmit={onAsk}><input value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="Ask about labs, medicines, dates, or changes…" disabled={asking} /><button className="primary" type="submit" disabled={asking || !question.trim()}>{asking ? <><LoaderCircle className="spin" size={15} /> Searching</> : <><Search size={15} /> Search archive</>}</button></form>{answer ? <div className="answer-box"><div className="answer-title"><strong>Archive answer</strong><span>Source-grounded</span></div><p>{answer}</p>{citations.length > 0 && <div className="citation-list"><strong>Sources</strong>{citations.map((citation, index) => <button type="button" className="citation-link" key={`${citation.document_id}-${index}`} onClick={() => onOpenSource(citation.document_id)}><span>Document {citation.document_id.slice(0, 8)}</span><small>page {citation.page_start ?? '—'}{citation.page_end && citation.page_end !== citation.page_start ? `–${citation.page_end}` : ''} · Open source</small></button>)}</div>}</div> : <div className="ask-empty"><Search size={20} /><span>Ask a question to compare records, find dates, or trace repeated measurements.</span></div>}</div></Page>
 }
-function Overview({ patient, documents, vitals, events, processingLabel, processingIcon, navigate }: { patient?: PatientProfile; documents: DocumentRecord[]; vitals: Vital[]; events: MedicalEvent[]; processingLabel: (s: string) => string; processingIcon: (s: string) => React.ReactNode; navigate: (s: string) => void }) { return <section className="page"><section className="hero"><div><p className="eyebrow">{patient?.display_name ?? 'WELCOME'}</p><h1>The clearest picture of care, over time.</h1><p className="muted">Upload historical records and turn scattered pages into a cited, searchable timeline.</p></div><div className="hero-orb"><HeartPulse size={38} /></div></section><div className="stat-grid"><article className="stat-card"><div className="stat-icon blue"><FileText size={18} /></div><span>Documents</span><strong>{documents.length}</strong><small>Uploaded to this profile</small></article><article className="stat-card"><div className="stat-icon green"><Activity size={18} /></div><span>Vitals captured</span><strong>{vitals.length}</strong><small>With source references</small></article><article className="stat-card"><div className="stat-icon amber"><HeartPulse size={18} /></div><span>Processing</span><strong>{documents.filter((d) => !['indexed', 'validated'].includes(d.processing_status)).length}</strong><small>Automatic backend queue</small></article></div><section className="content-grid"><article className="panel"><div className="panel-head"><div><p className="eyebrow">RECENT RECORDS</p><h3>Document library</h3></div><button className="icon-button" onClick={() => navigate('Documents')} aria-label="Open documents"><Search size={17} /></button></div>{documents.length ? <div className="document-list">{documents.slice(0, 6).map((doc) => <div className="document-row" key={doc.id}><div className="file-icon"><FileText size={17} /></div><div className="document-name"><strong>{doc.original_filename}</strong><span>{doc.content_classification === 'non_medical' ? 'Rejected: non-medical content' : doc.document_type ?? 'Awaiting classification'}</span></div><span className={`status ${doc.processing_status}`}>{processingIcon(doc.processing_status)} {doc.content_classification === 'non_medical' ? 'Rejected' : processingLabel(doc.processing_status)}</span></div>)}</div> : <Empty text="Upload a PDF or a clear photo of a medical page." />}</article><article className="panel"><div className="panel-head"><div><p className="eyebrow">CARE TIMELINE</p><h3>Doctors and visits</h3></div><span className="muted">{events.length} event{events.length === 1 ? '' : 's'}</span></div>{events.length ? <div className="timeline-list">{events.slice(0, 8).map((event) => <div className="timeline-item" key={event.id}><span className="timeline-date">{event.event_date ? new Date(`${event.event_date}T00:00:00`).toLocaleDateString() : 'Date unknown'}</span><div><strong>{event.doctor_name || event.title}</strong><span>{[event.specialty, event.facility, event.visit_reason || event.summary].filter(Boolean).join(' · ') || event.event_type}</span><small>Source page {event.source_page ?? '—'}</small></div></div>)}</div> : <Empty text="Doctors, facilities, visits, and procedures will appear here after extraction." />}</article></section></section> }
+function Overview({ patient, documents, vitals, events, processingLabel, processingIcon, navigate }: { patient?: PatientProfile; documents: DocumentRecord[]; vitals: Vital[]; events: MedicalEvent[]; processingLabel: (s: string) => string; processingIcon: (s: string) => React.ReactNode; navigate: (s: string) => void }) {
+  return (
+    <section className="page">
+      <section className="hero">
+        <div>
+          <p className="eyebrow">{patient?.display_name ?? 'WELCOME'}</p>
+          <h1>The clearest picture of care, over time.</h1>
+          <p className="muted">Upload historical records and turn scattered pages into a cited, searchable timeline.</p>
+        </div>
+        <div className="hero-orb"><HeartPulse size={38} /></div>
+      </section>
+      <div className="stat-grid">
+        <article className="stat-card">
+          <div className="stat-icon blue"><FileText size={18} /></div>
+          <span>Documents</span>
+          <strong>{documents.length}</strong>
+          <small>Uploaded to this profile</small>
+        </article>
+        <article className="stat-card">
+          <div className="stat-icon green"><Activity size={18} /></div>
+          <span>Vitals captured</span>
+          <strong>{vitals.length}</strong>
+          <small>With source references</small>
+        </article>
+        <article className="stat-card">
+          <div className="stat-icon amber"><HeartPulse size={18} /></div>
+          <span>Processing</span>
+          <strong>{documents.filter((d) => !['indexed', 'validated'].includes(d.processing_status)).length}</strong>
+          <small>Automatic backend queue</small>
+        </article>
+      </div>
+      <section className="content-grid">
+        <article className="panel">
+          <div className="panel-head">
+            <div>
+              <p className="eyebrow">RECENT RECORDS</p>
+              <h3>Document library</h3>
+            </div>
+            <button className="icon-button" onClick={() => navigate('Documents')} aria-label="Open documents"><Search size={17} /></button>
+          </div>
+          {documents.length ? (
+            <div className="document-list">
+              {documents.slice(0, 6).map((doc) => (
+                <div className="document-row" key={doc.id}>
+                  <div className="file-icon"><FileText size={17} /></div>
+                  <div className="document-name">
+                    <strong>{doc.original_filename}</strong>
+                    <span>{doc.document_type || (doc.processing_status === 'indexed' ? 'Prescription / Medical record' : 'Processing document')}</span>
+                  </div>
+                  <span className={`status ${doc.processing_status}`}>
+                    {processingIcon(doc.processing_status)} {processingLabel(doc.processing_status)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <Empty text="Upload a PDF or a clear photo of a medical page." />
+          )}
+        </article>
+        <article className="panel">
+          <div className="panel-head">
+            <div>
+              <p className="eyebrow">CARE TIMELINE</p>
+              <h3>Doctors and visits</h3>
+            </div>
+            <span className="muted">{events.length} event{events.length === 1 ? '' : 's'}</span>
+          </div>
+          {events.length ? (
+            <div className="timeline-list">
+              {events.slice(0, 8).map((event) => (
+                <div className="timeline-item" key={event.id}>
+                  <span className="timeline-date">{event.event_date ? new Date(`${event.event_date}T00:00:00`).toLocaleDateString() : 'Date unknown'}</span>
+                  <div>
+                    <strong>{event.doctor_name || event.title}</strong>
+                    <span>{[event.specialty, event.facility, event.visit_reason || event.summary].filter(Boolean).join(' · ') || event.event_type}</span>
+                    <small>Source page {event.source_page ?? '—'}</small>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <Empty text="Doctors, facilities, visits, and procedures will appear here after extraction." />
+          )}
+        </article>
+      </section>
+    </section>
+  )
+}
 
 export default App
