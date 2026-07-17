@@ -157,33 +157,72 @@ function App() {
     else if (data) { setPatients((current) => [...current, data as PatientProfile]); setSelectedPatient(data.id); setPatientName(''); setPatientDob(''); setPatientSex(''); setShowProfileForm(false); setNotice('Patient profile created.') }
   }
 
+async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentType: string; name: string }> {
+  const isPdf = file.name.toLowerCase().endsWith('.pdf') || file.type === 'application/pdf'
+  if (isPdf) {
+    return { blob: file, contentType: 'application/pdf', name: file.name }
+  }
+  const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|webp|heic)$/i.test(file.name)
+  if (isImage) {
+    try {
+      const bitmap = await createImageBitmap(file)
+      const maxDim = 2560
+      let { width, height } = bitmap
+      if (width > maxDim || height > maxDim) {
+        if (width > height) {
+          height = Math.round((height * maxDim) / width)
+          width = maxDim
+        } else {
+          width = Math.round((width * maxDim) / height)
+          height = maxDim
+        }
+      }
+      const canvas = document.createElement('canvas')
+      canvas.width = width
+      canvas.height = height
+      const ctx = canvas.getContext('2d')
+      if (ctx) {
+        ctx.drawImage(bitmap, 0, 0, width, height)
+        const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.88))
+        if (blob) {
+          const newName = file.name.replace(/\.[^/.]+$/, '') + '.jpg'
+          return { blob, contentType: 'image/jpeg', name: newName }
+        }
+      }
+    } catch (err) {
+      console.warn('Image optimization fallback:', err)
+    }
+  }
+  const contentType = file.type || (file.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg')
+  return { blob: file, contentType, name: file.name }
+}
+
   async function uploadFiles(event: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files ?? [])
     event.target.value = ''
     if (!supabase || !selectedPatient || !files.length || uploadingFiles) return
     const allowed = files.filter((file) => file.type === 'application/pdf' || file.type.startsWith('image/') || /\.(pdf|png|jpe?g|webp|heic)$/i.test(file.name))
     if (allowed.length !== files.length) { setNotice('Only PDF files and images (JPG, PNG, WEBP, or HEIC) can be uploaded.'); return }
-    setUploadingFiles(true); setUploadProgress(0); setUploadTotal(files.length); setNotice(`Selected ${files.length} file${files.length === 1 ? '' : 's'}. Uploading…`)
+    setUploadingFiles(true); setUploadProgress(0); setUploadTotal(files.length); setNotice(`Selected ${files.length} file${files.length === 1 ? '' : 's'}. Optimizing & uploading…`)
     let done = 0
     let uploadedCount = 0
     const uploadErrors: string[] = []
     for (const file of files) {
       const id = crypto.randomUUID()
-      const safeName = file.name.replace(/[^a-zA-Z0-9_.-]/g, '_')
+      const prepared = await prepareFileForUpload(file)
+      const safeName = prepared.name.replace(/[^a-zA-Z0-9_.-]/g, '_')
       const path = `${selectedPatient}/${id}/${safeName}`
-      const contentType = file.type || (file.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg')
       let upload: { error: { message: string } | null } = { error: null }
       for (let attempt = 1; attempt <= 3; attempt += 1) {
         try {
-          const buffer = await file.arrayBuffer()
-          const blob = new Blob([buffer], { type: contentType })
-          const result = await supabase.storage.from('medical-documents').upload(path, blob, {
+          const result = await supabase.storage.from('medical-documents').upload(path, prepared.blob, {
             upsert: false,
-            contentType,
+            contentType: prepared.contentType,
             cacheControl: '3600',
           })
           upload = { error: result.error ? { message: result.error.message } : null }
         } catch (err: any) {
+          console.error('Fetch exception during upload:', err)
           upload = { error: { message: err?.message || 'Network fetch error' } }
         }
         if (!upload.error) break
