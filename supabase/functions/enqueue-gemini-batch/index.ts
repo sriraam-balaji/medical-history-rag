@@ -267,15 +267,27 @@ async function indexExtraction(service: ReturnType<typeof createClient>, documen
   }
 
   // 2. Schema Validation & Normalization Layer
+  const pageDateMap = new Map<number, string>()
+  const documentDates = asArray(root.document_dates)
+  for (const dateItem of documentDates) {
+    const rawVal = typeof dateItem === 'object' && dateItem ? (dateItem.date ?? dateItem.raw_date) : String(dateItem)
+    const parsedDate = dateOnly(rawVal)
+    const pageNum = typeof dateItem === 'object' && dateItem && typeof dateItem.page === 'number' ? dateItem.page : 1
+    if (parsedDate) pageDateMap.set(pageNum, parsedDate)
+  }
+  const defaultDocDate = dateOnly(root.date ?? root.visit_date ?? root.consultation_date)
+
   const labs: any[] = []
   const labReports = asArray(patient.laboratory_reports ?? root.laboratory_reports ?? root.laboratory_results ?? root.lab_results ?? root.lab_reports ?? patient.laboratory_results)
   for (const report of labReports) {
-    const reportDate = dateTime(report.date ?? report.measured_at ?? root.date)
     const reportPage = typeof report.page === 'number' ? report.page : 1
+    const reportDate = dateTime(report.date ?? report.measured_at ?? pageDateMap.get(reportPage) ?? defaultDocDate)
     const results = asArray(report.results ?? report.tests ?? (report.test_name_raw || report.test || report.name ? [report] : []))
     for (const result of results) {
       const rawName = String(result.test_name_raw ?? result.test ?? result.name ?? '').trim()
       if (!rawName) continue
+      const resPage = typeof result.page === 'number' ? result.page : reportPage
+      const measuredAt = dateTime(result.measured_at ?? result.date ?? reportDate ?? pageDateMap.get(resPage) ?? defaultDocDate)
       labs.push({
         patient_id: document.patient_id,
         test_name_raw: rawName,
@@ -284,27 +296,29 @@ async function indexExtraction(service: ReturnType<typeof createClient>, documen
         numeric_value: typeof result.numeric_value === 'number' ? result.numeric_value : (typeof result.value === 'number' ? result.value : Number(result.value) || null),
         unit: result.unit ?? null,
         reference_range: result.reference_range ?? null,
-        measured_at: dateTime(result.measured_at ?? reportDate),
+        measured_at: measuredAt,
         source_document_id: document.id,
-        source_page: result.page ?? reportPage,
+        source_page: resPage,
         evidence: JSON.stringify(result),
         confidence: result.certainty === 'explicit' ? 0.95 : 0.85,
       })
     }
   }
 
-  const vitals = asArray(patient.vitals ?? root.vitals).flatMap((v) => {
+  const vitals = asArray(patient.vitals ?? root.vitals).flatMap((v, idx) => {
     const rawVal = v.numeric_value ?? v.value
     const numVal = typeof rawVal === 'number' ? rawVal : Number(rawVal)
     const type = String(v.vital_type ?? v.type ?? v.name ?? 'Vital').trim()
+    const pageNum = typeof v.page === 'number' ? v.page : (idx + 1)
+    const measuredAt = dateTime(v.measured_at ?? v.date ?? pageDateMap.get(pageNum) ?? defaultDocDate)
     return type ? [{
       patient_id: document.patient_id,
       vital_type: type,
       value: Number.isFinite(numVal) ? numVal : 0,
       unit: v.unit ?? null,
-      measured_at: dateTime(v.measured_at ?? v.date),
+      measured_at: measuredAt,
       source_document_id: document.id,
-      source_page: v.page ?? 1,
+      source_page: pageNum,
       evidence: JSON.stringify(v),
       confidence: v.certainty === 'explicit' ? 0.95 : 0.8,
     }] : []
