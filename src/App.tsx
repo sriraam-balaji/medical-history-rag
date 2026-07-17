@@ -80,7 +80,9 @@ function App() {
       supabase.from('medications').select('*').eq('patient_id', patientId).order('created_at', { ascending: false }),
       supabase.from('medical_events').select('*').eq('patient_id', patientId).order('event_date', { ascending: false }).limit(50),
     ])
-    if (!docs.error) setDocuments((docs.data ?? []) as DocumentRecord[])
+    if (docs.error) {
+      setNotice(`Could not refresh the document library: ${docs.error.message}. Retrying automatically…`)
+    } else setDocuments((docs.data ?? []) as DocumentRecord[])
     if (!vitalRows.error) setVitals((vitalRows.data ?? []) as Vital[])
     if (!labRows.error) setLabs((labRows.data ?? []) as LabResult[])
     if (!medRows.error) setMedicines((medRows.data ?? []) as Medication[])
@@ -163,6 +165,7 @@ function App() {
     if (allowed.length !== files.length) { setNotice('Only PDF files and images (JPG, PNG, WEBP, or HEIC) can be uploaded.'); return }
     setUploadingFiles(true); setUploadProgress(0); setUploadTotal(files.length); setNotice(`Selected ${files.length} file${files.length === 1 ? '' : 's'}. Uploading…`)
     let done = 0
+    let uploadedCount = 0
     for (const file of files) {
       const id = crypto.randomUUID(); const path = `${selectedPatient}/${id}/${file.name}`
       const upload = await supabase.storage.from('medical-documents').upload(path, file, { upsert: false })
@@ -171,13 +174,27 @@ function App() {
         const { data: userData } = await supabase.auth.getUser()
         const insert = await supabase.from('documents').insert({ id, patient_id: selectedPatient, original_filename: file.name, storage_path: path, processing_status: 'queued', created_by: userData.user?.id })
         if (insert.error) setNotice(`${file.name}: ${insert.error.message}`)
+        else uploadedCount += 1
       }
       done += 1; setUploadProgress(done)
+    }
+    if (!uploadedCount) {
+      setUploadingFiles(false)
+      setNotice('No files were uploaded. Please try again.')
+      await refreshPatientData(selectedPatient)
+      return
     }
     const { data: processingResult, error } = await supabase.functions.invoke('enqueue-gemini-batch')
     setUploadingFiles(false)
     const failedResult = processingResult?.results?.find((result: { status: string; error?: string }) => result.error || result.status === 'failed_retryable')
-    setNotice(error ? `Files uploaded, but processing could not start: ${error.message}` : failedResult?.error ? `Upload completed, but processing failed: ${failedResult.error}` : 'Files uploaded and processing has started. This can take a few minutes on the free tier.')
+    const transientFetchError = error && /failed to fetch|network|timeout|timed out/i.test(error.message)
+    setNotice(error
+      ? transientFetchError
+        ? 'Files uploaded. Processing is running in the background; this page will update automatically when it completes.'
+        : `Files uploaded, but processing could not start: ${error.message}`
+      : failedResult?.error
+        ? `Upload completed, but processing failed: ${failedResult.error}`
+        : 'Files uploaded and processing has started. This can take a few minutes on the free tier.')
     await refreshPatientData(selectedPatient); event.target.value = ''
   }
 
