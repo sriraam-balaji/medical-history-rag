@@ -168,15 +168,24 @@ function App() {
     let uploadedCount = 0
     const uploadErrors: string[] = []
     for (const file of files) {
-      const id = crypto.randomUUID(); const path = `${selectedPatient}/${id}/${file.name}`
+      const id = crypto.randomUUID()
+      const safeName = file.name.replace(/[^a-zA-Z0-9_.-]/g, '_')
+      const path = `${selectedPatient}/${id}/${safeName}`
+      const contentType = file.type || (file.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/jpeg')
       let upload: { error: { message: string } | null } = { error: null }
       for (let attempt = 1; attempt <= 3; attempt += 1) {
-        const result = await supabase.storage.from('medical-documents').upload(path, file, {
-          upsert: false,
-          contentType: file.type || (file.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream'),
-          cacheControl: '3600',
-        })
-        upload = { error: result.error ? { message: result.error.message } : null }
+        try {
+          const buffer = await file.arrayBuffer()
+          const blob = new Blob([buffer], { type: contentType })
+          const result = await supabase.storage.from('medical-documents').upload(path, blob, {
+            upsert: false,
+            contentType,
+            cacheControl: '3600',
+          })
+          upload = { error: result.error ? { message: result.error.message } : null }
+        } catch (err: any) {
+          upload = { error: { message: err?.message || 'Network fetch error' } }
+        }
         if (!upload.error) break
         if (attempt < 3) await new Promise((resolve) => window.setTimeout(resolve, 900 * attempt))
       }
@@ -191,7 +200,12 @@ function App() {
     }
     if (!uploadedCount) {
       setUploadingFiles(false)
-      setNotice(uploadErrors[0] ?? 'The selected file could not be uploaded. Please try again.')
+      const err = uploadErrors[0] ?? ''
+      if (/failed to fetch/i.test(err)) {
+        setNotice('Upload failed ("Failed to fetch"). Check mobile network connection or verify Supabase Storage CORS settings allow your site domain.')
+      } else {
+        setNotice(err || 'The selected file could not be uploaded. Please try again.')
+      }
       await refreshPatientData(selectedPatient)
       return
     }
