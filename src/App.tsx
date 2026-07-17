@@ -363,9 +363,15 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
 
   async function retryDocument(document: DocumentRecord) {
     if (!supabase || deletingDocumentId) return
-    if ((document.retry_count ?? 0) >= 1) { setNotice('This document has already used its one allowed retry.'); return }
     setDeletingDocumentId(document.id)
-    const { error: updateError } = await supabase.from('documents').update({ processing_status: 'queued', processed_at: null, retry_count: (document.retry_count ?? 0) + 1 }).eq('id', document.id).eq('retry_count', document.retry_count ?? 0)
+    const { error: updateError } = await supabase.from('documents').update({
+      processing_status: 'queued',
+      content_classification: 'medical_document',
+      rejection_reason: null,
+      processed_at: null,
+      retry_count: (document.retry_count ?? 0) + 1
+    }).eq('id', document.id)
+    
     const { data: processingResult, error: functionError } = updateError ? { data: null, error: updateError } : await supabase.functions.invoke('enqueue-gemini-batch')
     setDeletingDocumentId(null)
     const result = processingResult?.results?.find((item: { id: string }) => item.id === document.id)

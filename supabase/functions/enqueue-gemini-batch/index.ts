@@ -4,7 +4,7 @@ const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers
 const GEMINI = 'https://generativelanguage.googleapis.com/v1beta'
 const GEMINI_UPLOAD = 'https://generativelanguage.googleapis.com/upload/v1beta/files'
 const MODEL = 'gemini-3.1-flash-lite'
-const PROMPT = `Classify and extract this historical document into JSON. This archive accepts medical records only. Set content_classification to exactly one of medical_document, non_medical, or uncertain. For medical_document, set document_type to a concise category such as dermatology consultation, prescription, laboratory report, imaging report, discharge summary, general checkup, vaccination record, medical bill, or other clinical record. Extract exact dates, values, units, medicine instructions, uncertainty, and page references. Never infer missing facts. Distinguish prescribed, reported_taking, stopped, changed, completed, and unknown. Extract visits or appointments with doctor_name, specialty, facility, visit_reason, date, type, and page. Extract every explicit care instruction, recommendation, do/don't, diet instruction, procedure plan, follow-up instruction, and duration under care_instructions with instruction, category, date, and page. Return JSON only.`
+const PROMPT = `Classify and extract this medical document into JSON. This archive accepts all health and medical records including doctor prescriptions (handwritten or printed), clinic letterheads (e.g. Gandhi Clinic, Gericare Hospital), Rx slips, laboratory reports, blood test results (FBS, PPBS, HbA1c, lipid profile), imaging reports, discharge summaries, and medical consultation notes. Set content_classification to "medical_document". Always classify any clinic letterhead, doctor prescription, Rx symbol, or health note as "medical_document" (do not classify clinical pages as non_medical or uncertain). For document_type, specify a concise category such as prescription, laboratory report, consultation note, or clinical record. Extract exact dates, patient names (e.g. Mr Balaji Ramasamy), doctor names (e.g. Dr R Indhumathi), facility names (e.g. Gandhi Clinic, Gericare Hospital), medications (e.g. Istamet, Udapa, Lipaglyn, Telma, Roswas, Azee, Dolo, Flomist), lab test values (FBS, PPBS, HbA1c), reference ranges, visit reasons, and page numbers. Return JSON only.`
 const EMBEDDING_MODEL = 'gemini-embedding-2'
 const ENABLE_BATCH_API = Deno.env.get('ENABLE_GEMINI_BATCH') === 'true'
 
@@ -24,6 +24,38 @@ function mimeTypeFor(filename: string): string {
   if (name.endsWith('.webp')) return 'image/webp'
   if (name.endsWith('.heic')) return 'image/heic'
   return 'image/jpeg'
+}
+
+function isMedicalClassification(classification: string, validated: unknown): boolean {
+  const c = String(classification || '').toLowerCase().trim()
+  if (
+    c === 'medical_document' ||
+    c === 'prescription' ||
+    c === 'medical_record' ||
+    c === 'clinical_record' ||
+    c === 'lab_report' ||
+    c === 'consultation' ||
+    c === 'doctor_note' ||
+    c.includes('medical') ||
+    c.includes('prescrit') ||
+    c.includes('clinic') ||
+    c.includes('doctor') ||
+    c === 'uncertain'
+  ) {
+    return true
+  }
+  const root = asObject(validated)
+  const patient = asObject(root.patient)
+  if (
+    asArray(patient.medications ?? root.medications ?? root.medicines ?? patient.prescriptions ?? root.prescriptions).length > 0 ||
+    asArray(patient.laboratory_reports ?? root.laboratory_reports ?? root.lab_results).length > 0 ||
+    asArray(patient.vitals ?? root.vitals).length > 0 ||
+    asArray(patient.visits ?? root.visits ?? patient.appointments ?? root.appointments).length > 0 ||
+    root.doctor_name || root.facility || root.hospital || root.clinic || root.doctor || root.diagnoses
+  ) {
+    return true
+  }
+  return false
 }
 
 async function recordFailure(service: ReturnType<typeof createClient>, documentId: string, message: string) {
@@ -208,7 +240,7 @@ Deno.serve(async (request) => {
       try {
         fallback = await runNormalFallback(file.uri, file.mimeType, geminiKey)
         const classification = contentClassification(fallback.validated)
-        if (classification !== 'medical_document') throw new Error(`NonMedicalDocument: Gemini classified this upload as ${classification || 'uncertain'}. Only medical records are accepted.`)
+        if (!isMedicalClassification(classification, fallback.validated)) throw new Error(`NonMedicalDocument: Gemini classified this upload as ${classification || 'uncertain'}. Only medical records are accepted.`)
         await indexExtraction(service, file, fallback.validated, geminiKey)
         await service.from('extraction_jobs').delete().eq('document_id', file.id)
         requireDb(await service.from('extraction_jobs').insert({ document_id: file.id, status: 'indexed', raw_output: fallback.output, validated_output: fallback.validated, model_version: MODEL, prompt_version: 'v1-fallback', schema_version: 'v1' }), 'Save extraction job')
