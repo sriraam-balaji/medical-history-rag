@@ -169,7 +169,17 @@ function App() {
     const uploadErrors: string[] = []
     for (const file of files) {
       const id = crypto.randomUUID(); const path = `${selectedPatient}/${id}/${file.name}`
-      const upload = await supabase.storage.from('medical-documents').upload(path, file, { upsert: false })
+      let upload: { error: { message: string } | null } = { error: null }
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        const result = await supabase.storage.from('medical-documents').upload(path, file, {
+          upsert: false,
+          contentType: file.type || (file.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream'),
+          cacheControl: '3600',
+        })
+        upload = { error: result.error ? { message: result.error.message } : null }
+        if (!upload.error) break
+        if (attempt < 3) await new Promise((resolve) => window.setTimeout(resolve, 900 * attempt))
+      }
       if (upload.error) uploadErrors.push(`${file.name}: ${upload.error.message}`)
       else {
         const { data: userData } = await supabase.auth.getUser()
