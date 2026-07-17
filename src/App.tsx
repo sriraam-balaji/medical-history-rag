@@ -99,7 +99,11 @@ function App() {
       : await supabase.auth.signInWithPassword({ email: email.trim(), password })
     setAuthBusy(false)
     if (result.error) setNotice(result.error.message)
-    else if (authMode === 'signup' && !result.data.session) setNotice('Account created. Sign in with your email and password.')
+    else if (authMode === 'signup' && !result.data.session) {
+      const signIn = await supabase.auth.signInWithPassword({ email: email.trim(), password })
+      if (signIn.error) setNotice('Account created, but Supabase still requires email confirmation. Disable Confirm email in Authentication → Providers → Email, then try again.')
+      else { setNotice('Account created and signed in.'); setShowLogin(false); setPassword('') }
+    }
     else { setNotice('Signed in.'); setShowLogin(false); setPassword('') }
   }
 
