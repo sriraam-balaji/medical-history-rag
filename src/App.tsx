@@ -386,7 +386,7 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
     }
 
     setNotice('Extraction in progress… Parsing medicines, vitals, and visits.')
-    const { data: processingResult, error: functionError } = await supabase.functions.invoke('enqueue-gemini-batch').catch((err) => ({ data: null, error: err }))
+    const { data: processingResult, error: functionError } = await supabase.functions.invoke('enqueue-gemini-batch', { body: { document_id: document.id } }).catch((err) => ({ data: null, error: err }))
     setDeletingDocumentId(null)
     if (functionError) {
       setNotice('Document queued! Gemini backend is parsing doctor notes and labs.')

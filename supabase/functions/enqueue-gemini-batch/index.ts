@@ -297,16 +297,26 @@ Deno.serve(async (request) => {
   const { data: userData } = await userClient.auth.getUser()
   if (!userData.user) return json({ error: 'Invalid session' }, 401)
 
-  const { data: documents, error } = await userClient.from('documents').select('id, patient_id, original_filename, storage_path').eq('processing_status', 'queued').limit(10)
+  const body = await request.json().catch(() => null)
+  const targetDocumentId = typeof body?.document_id === 'string' ? body.document_id : null
+
+  let documentQuery = userClient.from('documents').select('id, patient_id, original_filename, storage_path')
+  if (targetDocumentId) {
+    documentQuery = documentQuery.eq('id', targetDocumentId)
+  } else {
+    documentQuery = documentQuery.in('processing_status', ['queued', 'processing', 'failed_retryable', 'failed_permanent']).limit(10)
+  }
+
+  const { data: documents, error } = await documentQuery
   if (error) return json({ error: error.message }, 500)
-  if (!documents?.length) return json({ message: 'No queued documents', count: 0 })
+  if (!documents?.length) return json({ message: 'No documents to process', count: 0 })
   const geminiKey = Deno.env.get('GEMINI_API_KEY')
   if (!geminiKey) return json({ error: 'GEMINI_API_KEY is not configured' }, 503)
 
   const uploadedFiles: Array<{ id: string; patient_id: string; storage_path: string; uri: string; mimeType: string }> = []
   for (const document of documents) {
     try {
-      const claimed = await service.from('documents').update({ processing_status: 'processing' }).eq('id', document.id).eq('processing_status', 'queued').select('id').maybeSingle()
+      const claimed = await service.from('documents').update({ processing_status: 'processing' }).eq('id', document.id).select('id').maybeSingle()
       if (claimed.error) throw new Error(`Claim document: ${claimed.error.message}`)
       if (!claimed.data) continue
       const { data: signed } = await service.storage.from('medical-documents').createSignedUrl(document.storage_path, 3600)
