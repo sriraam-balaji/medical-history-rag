@@ -89,6 +89,7 @@ function App() {
       if (!jobs.error) {
         const errors: Record<string, string> = {}
         for (const job of jobs.data ?? []) if (job.error_message && !errors[job.document_id]) errors[job.document_id] = job.error_message
+        for (const doc of docs.data ?? []) if (doc.processing_status === 'indexed' && !doc.document_type && !errors[doc.id]) errors[doc.id] = 'Ready for improved classification and care-instruction extraction. Retry processing.'
         setDocumentErrors(errors)
       }
     }
