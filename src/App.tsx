@@ -157,8 +157,11 @@ function App() {
 
   async function uploadFiles(event: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files ?? [])
+    event.target.value = ''
     if (!supabase || !selectedPatient || !files.length || uploadingFiles) return
-    setUploadingFiles(true); setUploadProgress(0); setUploadTotal(files.length); setNotice(`Uploading ${files.length} file${files.length === 1 ? '' : 's'}…`)
+    const allowed = files.filter((file) => file.type === 'application/pdf' || file.type.startsWith('image/') || /\.(pdf|png|jpe?g|webp|heic)$/i.test(file.name))
+    if (allowed.length !== files.length) { setNotice('Only PDF files and images (JPG, PNG, WEBP, or HEIC) can be uploaded.'); return }
+    setUploadingFiles(true); setUploadProgress(0); setUploadTotal(files.length); setNotice(`Selected ${files.length} file${files.length === 1 ? '' : 's'}. Uploading…`)
     let done = 0
     for (const file of files) {
       const id = crypto.randomUUID(); const path = `${selectedPatient}/${id}/${file.name}`
