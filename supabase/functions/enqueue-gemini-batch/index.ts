@@ -4,7 +4,90 @@ const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers
 const GEMINI = 'https://generativelanguage.googleapis.com/v1beta'
 const GEMINI_UPLOAD = 'https://generativelanguage.googleapis.com/upload/v1beta/files'
 const MODEL = 'gemini-3.1-flash-lite'
-const PROMPT = `Classify and extract this medical document into JSON. This archive accepts all health and medical records including doctor prescriptions (handwritten or printed), clinic letterheads (e.g. Gandhi Clinic, Gericare Hospital), Rx slips, laboratory reports, blood test results (FBS, PPBS, HbA1c, lipid profile), imaging reports, discharge summaries, and medical consultation notes. Set content_classification to "medical_document". Always classify any clinic letterhead, doctor prescription, Rx symbol, or health note as "medical_document" (do not classify clinical pages as non_medical or uncertain). For document_type, specify a concise category such as prescription, laboratory report, consultation note, or clinical record. Extract exact dates, patient names (e.g. Mr Balaji Ramasamy), doctor names (e.g. Dr R Indhumathi), facility names (e.g. Gandhi Clinic, Gericare Hospital), medications (e.g. Istamet, Udapa, Lipaglyn, Telma, Roswas, Azee, Dolo, Flomist), lab test values (FBS, PPBS, HbA1c), reference ranges, visit reasons, and page numbers. Return JSON only.`
+const PROMPT = `You are an information extraction system for a medical archive. Your task is to classify the document and extract only information explicitly present in the document. Do not summarize, interpret, diagnose, or infer medical conclusions.
+
+### CLASSIFICATION DEFINITIONS:
+- "medical_document": Contains clinical health information such as doctor prescriptions (handwritten or printed), clinic letterheads (e.g. Gandhi Clinic, Gericare Hospital), Rx slips, laboratory blood tests (FBS, PPBS, HbA1c), imaging reports, discharge summaries, vaccination records, consultation notes, or hospital bills.
+- "non_medical": Contains zero health or clinical information.
+- "uncertain": The scan quality or content is insufficient to determine clinical nature.
+
+### GENERAL EXTRACTION RULES:
+1. Preserve exact original wording for diagnoses, medications, test names, and instructions whenever practical.
+2. Do not normalize medical terminology beyond formatting dates (ISO YYYY-MM-DD) and standard units.
+3. Page numbering starts at 1 (1-indexed).
+4. If information is absent, use null for single values and [] for arrays. Never omit schema keys.
+5. If text cannot be read confidently due to poor scan quality or handwriting, mark certainty as "unreadable" or "ambiguous" rather than guessing.
+6. Do not duplicate identical medications or laboratory test results appearing across multiple pages.
+
+### OUTPUT JSON SCHEMA:
+Return ONLY a valid JSON object matching this exact structure:
+{
+  "content_classification": "medical_document",
+  "document_type": "prescription",
+  "patient": {
+    "name": null,
+    "dob": null,
+    "sex": null
+  },
+  "provider": {
+    "doctor_name": null,
+    "facility_name": null,
+    "specialty": null
+  },
+  "document_dates": [],
+  "medications": [
+    {
+      "brand_name": "Istamet",
+      "generic_name": null,
+      "strength": "50/500mg",
+      "dosage_form": "tablet",
+      "frequency": "1-0-1",
+      "duration": "1 month",
+      "status": "prescribed",
+      "page": 1,
+      "certainty": "explicit"
+    }
+  ],
+  "vitals": [
+    {
+      "type": "blood_pressure",
+      "value": "120/80",
+      "numeric_value": 120,
+      "unit": "mmHg",
+      "measured_at": null,
+      "page": 1
+    }
+  ],
+  "laboratory_results": [
+    {
+      "test_name_raw": "FBS",
+      "test_name_normalized": "Fasting Blood Sugar",
+      "numeric_value": 128,
+      "value_text": "128",
+      "unit": "mg/dL",
+      "reference_range": "70-99",
+      "measured_at": null,
+      "page": 1
+    }
+  ],
+  "medical_events": [
+    {
+      "event_type": "consultation",
+      "title": "Consultation at Gandhi Clinic",
+      "doctor_name": "Dr R Indhumathi",
+      "facility": "Gandhi Clinic",
+      "visit_reason": null,
+      "event_date": null,
+      "page": 1
+    }
+  ],
+  "diagnoses": [
+    {
+      "raw_text": "Type 2 Diabetes Mellitus",
+      "certainty": "explicit"
+    }
+  ]
+}`
 const EMBEDDING_MODELS = ['gemini-embedding-2', 'text-embedding-004', 'embedding-001']
 const FLASH_MODELS = ['gemini-3.1-flash-lite', 'gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash']
 const ENABLE_BATCH_API = Deno.env.get('ENABLE_GEMINI_BATCH') === 'true'
