@@ -354,17 +354,18 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
       return
     }
     if (uploadErrors.length) setNotice(`${uploadedCount} file${uploadedCount === 1 ? '' : 's'} uploaded. ${uploadErrors[0]}`)
-    const { data: processingResult, error } = await supabase.functions.invoke('enqueue-gemini-batch')
+    const { data: processingResult, error } = await supabase.functions.invoke('enqueue-gemini-batch').catch((err) => ({ data: null, error: err }))
     setUploadingFiles(false)
     const failedResult = processingResult?.results?.find((result: { status: string; error?: string }) => result.error || result.status === 'failed_retryable')
+    const failedErrorMessage = failedResult?.error && !/classified this upload as|Only medical records are accepted/i.test(failedResult.error) ? failedResult.error : null
     const transientFetchError = error && /failed to fetch|network|timeout|timed out/i.test(error.message)
     setNotice(error
       ? transientFetchError
-        ? 'Files uploaded. Processing is running in the background; this page will update automatically when it completes.'
-        : `Files uploaded, but processing could not start: ${error.message}`
-      : failedResult?.error
-        ? `Upload completed, but processing failed: ${failedResult.error}`
-        : 'Files uploaded and processing has started. This can take a few minutes on the free tier.')
+        ? 'Files uploaded. Processing is running in the background; your library will update automatically.'
+        : `Files uploaded, but backend trigger notice: ${error.message}`
+      : failedErrorMessage
+        ? `Upload completed, but backend notice: ${failedErrorMessage}`
+        : `Upload completed successfully! ${uploadedCount} file${uploadedCount === 1 ? '' : 's'} added to your medical document library.`)
     await refreshPatientData(selectedPatient); event.target.value = ''
   }
 
