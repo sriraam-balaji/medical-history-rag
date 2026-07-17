@@ -524,12 +524,25 @@ function MedicineRow({ med, onEdit, onDelete }: { med: Medication; onEdit: (med:
   }
 
   return (
-    <div className="data-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-      <div>
-        <strong>{med.brand_name || med.generic_name || 'Unnamed medicine'}</strong>
-        <span>{[med.generic_name, med.strength, med.dosage_form, med.route].filter(Boolean).join(' · ') || 'Details pending'} · source page {med.source_page ?? '1'}</span>
+    <div className="data-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 0' }}>
+      <div className="medicine-info" style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px', flexWrap: 'wrap' }}>
+          <strong className="medicine-title" style={{ fontSize: '15px', color: '#1a2e26', fontWeight: 600 }}>
+            {med.brand_name || med.generic_name || 'Unnamed medicine'}
+          </strong>
+          {med.generic_name && med.brand_name && med.generic_name.toLowerCase() !== med.brand_name.toLowerCase() && (
+            <span style={{ fontSize: '13px', color: '#62776c', fontWeight: 400 }}>
+              ({med.generic_name})
+            </span>
+          )}
+        </div>
+        <div style={{ fontSize: '13px', color: '#62776c', display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+          <span>{[med.strength, med.dosage_form, med.route].filter(Boolean).join(' · ') || 'Details pending'}</span>
+          <span style={{ color: '#b0c2b8' }}>•</span>
+          <span style={{ color: '#80968a' }}>source page {med.source_page ?? 1}</span>
+        </div>
       </div>
-      <div style={{ display: 'flex', gap: '6px' }}>
+      <div style={{ display: 'flex', gap: '6px', flexShrink: 0 }}>
         <button type="button" className="retry-button" onClick={() => setEditing(true)} title="Edit medicine details" aria-label="Edit medicine"><Pencil size={14} /></button>
         <button type="button" className="delete-button" onClick={() => onDelete(med.id)} title="Delete medicine" aria-label="Delete medicine"><Trash2 size={14} /></button>
       </div>
