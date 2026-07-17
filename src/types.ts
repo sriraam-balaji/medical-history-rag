@@ -14,6 +14,7 @@ export type DocumentRecord = {
   document_type: string | null
   content_classification?: string | null
   rejection_reason?: string | null
+  retry_count?: number
   processing_status: string
   created_at: string
 }

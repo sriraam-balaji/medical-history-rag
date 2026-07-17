@@ -90,7 +90,7 @@ function App() {
       if (!jobs.error) {
         const errors: Record<string, string> = {}
         for (const job of jobs.data ?? []) if (job.error_message && !errors[job.document_id]) errors[job.document_id] = job.error_message
-        for (const doc of docs.data ?? []) if (doc.processing_status === 'indexed' && !doc.document_type && !errors[doc.id]) errors[doc.id] = 'Ready for improved classification and care-instruction extraction. Retry processing.'
+        for (const doc of docs.data ?? []) if (doc.processing_status === 'indexed' && (doc.retry_count ?? 0) < 1 && !errors[doc.id]) errors[doc.id] = 'One extraction retry is available for improved classification and care-instruction extraction.'
         setDocumentErrors(errors)
       }
     }
@@ -192,8 +192,9 @@ function App() {
 
   async function retryDocument(document: DocumentRecord) {
     if (!supabase || deletingDocumentId) return
+    if ((document.retry_count ?? 0) >= 1) { setNotice('This document has already used its one allowed retry.'); return }
     setDeletingDocumentId(document.id)
-    const { error: updateError } = await supabase.from('documents').update({ processing_status: 'queued', processed_at: null }).eq('id', document.id)
+    const { error: updateError } = await supabase.from('documents').update({ processing_status: 'queued', processed_at: null, retry_count: (document.retry_count ?? 0) + 1 }).eq('id', document.id).eq('retry_count', document.retry_count ?? 0)
     const { data: processingResult, error: functionError } = updateError ? { data: null, error: updateError } : await supabase.functions.invoke('enqueue-gemini-batch')
     setDeletingDocumentId(null)
     const result = processingResult?.results?.find((item: { id: string }) => item.id === document.id)
