@@ -268,11 +268,11 @@ async function indexExtraction(service: ReturnType<typeof createClient>, documen
 
   // 2. Schema Validation & Normalization Layer
   const labs: any[] = []
-  const labReports = asArray(patient.laboratory_reports ?? root.laboratory_reports ?? root.lab_results)
+  const labReports = asArray(patient.laboratory_reports ?? root.laboratory_reports ?? root.laboratory_results ?? root.lab_results ?? root.lab_reports ?? patient.laboratory_results)
   for (const report of labReports) {
     const reportDate = dateTime(report.date ?? report.measured_at ?? root.date)
     const reportPage = typeof report.page === 'number' ? report.page : 1
-    const results = asArray(report.results ?? report.tests ?? (report.test_name_raw ? [report] : []))
+    const results = asArray(report.results ?? report.tests ?? (report.test_name_raw || report.test || report.name ? [report] : []))
     for (const result of results) {
       const rawName = String(result.test_name_raw ?? result.test ?? result.name ?? '').trim()
       if (!rawName) continue
