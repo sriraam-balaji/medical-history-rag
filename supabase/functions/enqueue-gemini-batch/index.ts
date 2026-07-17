@@ -253,14 +253,18 @@ async function indexExtraction(service: ReturnType<typeof createClient>, documen
   const documentType = String(root.document_type ?? root.document_category ?? 'Prescription / Medical record').trim().slice(0, 120)
 
   // 1. Audit Log: Store raw canonical JSON extraction for auditability, versioning, and re-processing
-  await service.from('extraction_jobs').insert({
-    document_id: document.id,
-    status: 'completed',
-    prompt_version: 'v3-strict-canonical',
-    schema_version: 'v2',
-    raw_json: JSON.stringify(extracted),
-    error_message: null
-  }).catch(() => null)
+  try {
+    await service.from('extraction_jobs').insert({
+      document_id: document.id,
+      status: 'completed',
+      prompt_version: 'v3-strict-canonical',
+      schema_version: 'v2',
+      raw_json: JSON.stringify(extracted),
+      error_message: null
+    })
+  } catch (_auditErr) {
+    // Non-blocking audit log catch
+  }
 
   // 2. Schema Validation & Normalization Layer
   const labs: any[] = []
