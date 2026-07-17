@@ -481,7 +481,7 @@ Deno.serve(async (request) => {
         requireDb(await service.from('extraction_jobs').insert({ document_id: file.id, status: 'indexed', raw_output: fallback.output, validated_output: fallback.validated, model_version: MODEL, prompt_version: 'v1-fallback', schema_version: 'v1' }), 'Save extraction job')
         const indexedRoot = asObject(fallback.validated)
         requireDb(await service.from('documents').update({ processing_status: 'indexed', content_classification: 'medical_document', document_type: String(indexedRoot.document_type ?? indexedRoot.document_category ?? 'Medical record').slice(0, 120), rejection_reason: null, processed_at: new Date().toISOString() }).eq('id', file.id), 'Mark document indexed')
-        fallbackResults.push({ id: file.id, status: 'indexed', embedding_model: EMBEDDING_MODEL })
+        fallbackResults.push({ id: file.id, status: 'indexed', embedding_model: EMBEDDING_MODELS[0] })
       } catch (fallbackError) {
         const errorMessage = String(fallbackError)
         if (errorMessage.includes('NonMedicalDocument:')) {
