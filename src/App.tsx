@@ -166,24 +166,26 @@ function App() {
     setUploadingFiles(true); setUploadProgress(0); setUploadTotal(files.length); setNotice(`Selected ${files.length} file${files.length === 1 ? '' : 's'}. Uploading…`)
     let done = 0
     let uploadedCount = 0
+    const uploadErrors: string[] = []
     for (const file of files) {
       const id = crypto.randomUUID(); const path = `${selectedPatient}/${id}/${file.name}`
       const upload = await supabase.storage.from('medical-documents').upload(path, file, { upsert: false })
-      if (upload.error) setNotice(`${file.name}: ${upload.error.message}`)
+      if (upload.error) uploadErrors.push(`${file.name}: ${upload.error.message}`)
       else {
         const { data: userData } = await supabase.auth.getUser()
         const insert = await supabase.from('documents').insert({ id, patient_id: selectedPatient, original_filename: file.name, storage_path: path, processing_status: 'queued', created_by: userData.user?.id })
-        if (insert.error) setNotice(`${file.name}: ${insert.error.message}`)
+        if (insert.error) uploadErrors.push(`${file.name}: ${insert.error.message}`)
         else uploadedCount += 1
       }
       done += 1; setUploadProgress(done)
     }
     if (!uploadedCount) {
       setUploadingFiles(false)
-      setNotice('No files were uploaded. Please try again.')
+      setNotice(uploadErrors[0] ?? 'The selected file could not be uploaded. Please try again.')
       await refreshPatientData(selectedPatient)
       return
     }
+    if (uploadErrors.length) setNotice(`${uploadedCount} file${uploadedCount === 1 ? '' : 's'} uploaded. ${uploadErrors[0]}`)
     const { data: processingResult, error } = await supabase.functions.invoke('enqueue-gemini-batch')
     setUploadingFiles(false)
     const failedResult = processingResult?.results?.find((result: { status: string; error?: string }) => result.error || result.status === 'failed_retryable')
