@@ -1,6 +1,10 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
-const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type' }
+const cors = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+}
 const GEMINI = 'https://generativelanguage.googleapis.com/v1beta'
 const GEMINI_UPLOAD = 'https://generativelanguage.googleapis.com/upload/v1beta/files'
 const MODEL = 'gemini-3.1-flash-lite'
@@ -115,7 +119,6 @@ Return ONLY a valid JSON object matching this exact structure:
 }`
 const EMBEDDING_MODELS = ['gemini-embedding-2', 'text-embedding-004', 'embedding-001']
 const FLASH_MODELS = ['gemini-3.1-flash-lite', 'gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash']
-const MODEL = 'gemini-3.1-flash-lite'
 const ENABLE_BATCH_API = Deno.env.get('ENABLE_GEMINI_BATCH') === 'true'
 
 function json(data: unknown, status = 200) {
@@ -342,8 +345,8 @@ async function indexExtraction(service: ReturnType<typeof createClient>, documen
 
   // 2. Schema Validation & Normalization Layer
   const pageDateMap = new Map<number, string>()
-  const documentDates = asArray(root.document_dates)
-  for (const dateItem of documentDates) {
+  const pageDocumentDates = asArray(root.document_dates)
+  for (const dateItem of pageDocumentDates) {
     const rawVal = typeof dateItem === 'object' && dateItem ? (dateItem.date ?? dateItem.date_text ?? dateItem.raw_date) : String(dateItem)
     const parsedDate = parseFlexibleDate(rawVal)
     const pageNum = typeof dateItem === 'object' && dateItem && typeof dateItem.page === 'number' ? dateItem.page : 1
@@ -557,8 +560,8 @@ async function indexExtraction(service: ReturnType<typeof createClient>, documen
   ].map((e) => ({ ...e, patient_id: document.patient_id, source_document_id: document.id }))
 
   // Extract distinct document dates from multi-page records as individual consultation events
-  const documentDates = asArray(root.document_dates)
-  for (const dateItem of documentDates) {
+  const eventDocumentDates = asArray(root.document_dates)
+  for (const dateItem of eventDocumentDates) {
     const rawVal = typeof dateItem === 'object' && dateItem ? (dateItem.date ?? dateItem.raw_date) : String(dateItem)
     const parsedDate = dateOnly(rawVal)
     const pageNum = typeof dateItem === 'object' && dateItem && typeof dateItem.page === 'number' ? dateItem.page : 1
@@ -655,11 +658,11 @@ Deno.serve(async (request) => {
   const body = await request.json().catch(() => null)
   const targetDocumentId = typeof body?.document_id === 'string' ? body.document_id : null
 
-  let documentQuery = service.from('documents').select('id, patient_id, original_filename, storage_path')
+  let documentQuery = service.from('documents').select('id, patient_id, original_filename, storage_path, patient_profiles!inner(owner_user_id)')
   if (targetDocumentId) {
-    documentQuery = documentQuery.eq('id', targetDocumentId)
+    documentQuery = documentQuery.eq('id', targetDocumentId).eq('patient_profiles.owner_user_id', userData.user.id)
   } else {
-    documentQuery = documentQuery.in('processing_status', ['queued', 'processing', 'failed_retryable', 'failed_permanent']).limit(10)
+    documentQuery = documentQuery.eq('patient_profiles.owner_user_id', userData.user.id).in('processing_status', ['queued', 'processing', 'failed_retryable']).limit(10)
   }
 
   const { data: documents, error } = await documentQuery

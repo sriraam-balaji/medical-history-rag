@@ -349,8 +349,20 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
     for (const docId of newlyUploadedDocIds) {
       processed += 1
       setNotice(`Extracting lab trends & vitals (${processed}/${uploadedCount})…`)
-      await supabase.functions.invoke('enqueue-gemini-batch', { body: { document_id: docId } }).catch(console.warn)
+      const { data: processingResult, error: processingError } = await supabase.functions
+        .invoke('enqueue-gemini-batch', { body: { document_id: docId } })
+        .catch((error) => ({ data: null, error }))
       await refreshPatientData(selectedPatient)
+      if (processingError) {
+        setNotice(`Uploaded ${uploadedCount} file${uploadedCount === 1 ? '' : 's'}, but extraction failed: ${processingError.message}. You can retry it from Documents.`)
+        setUploadingFiles(false)
+        return
+      }
+      if (processingResult?.error) {
+        setNotice(`Uploaded ${uploadedCount} file${uploadedCount === 1 ? '' : 's'}, but extraction failed: ${processingResult.error}. You can retry it from Documents.`)
+        setUploadingFiles(false)
+        return
+      }
     }
 
     setUploadingFiles(false)
@@ -413,8 +425,14 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
     for (const doc of pendingDocs) {
       count += 1
       setNotice(`Extracting document ${count} of ${pendingDocs.length} (“${doc.original_filename}”)…`)
-      await supabase.functions.invoke('enqueue-gemini-batch', { body: { document_id: doc.id } }).catch(console.warn)
+      const { data, error } = await supabase.functions
+        .invoke('enqueue-gemini-batch', { body: { document_id: doc.id } })
+        .catch((invokeError) => ({ data: null, error: invokeError }))
       await refreshPatientData(selectedPatient)
+      if (error || data?.error) {
+        setNotice(`Processing stopped for “${doc.original_filename}”: ${error?.message ?? data.error}. Retry it from Documents.`)
+        return
+      }
     }
     setNotice('Extraction completed for all queued documents!')
   }
