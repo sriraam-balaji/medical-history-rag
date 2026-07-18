@@ -658,16 +658,27 @@ Deno.serve(async (request) => {
   const body = await request.json().catch(() => null)
   const targetDocumentId = typeof body?.document_id === 'string' ? body.document_id : null
 
-  let documentQuery = service.from('documents').select('id, patient_id, original_filename, storage_path, patient_profiles!inner(owner_user_id)')
+  let documents: Array<{ id: string; patient_id: string; original_filename: string; storage_path: string }> = []
   if (targetDocumentId) {
-    documentQuery = documentQuery.eq('id', targetDocumentId).eq('patient_profiles.owner_user_id', userData.user.id)
+    const { data: document, error } = await service.from('documents').select('id, patient_id, original_filename, storage_path').eq('id', targetDocumentId).maybeSingle()
+    if (error) return json({ error: error.message }, 500)
+    if (document) {
+      const { data: profile, error: profileError } = await service.from('patient_profiles').select('owner_user_id').eq('id', document.patient_id).maybeSingle()
+      if (profileError) return json({ error: profileError.message }, 500)
+      if (profile?.owner_user_id === userData.user.id) documents = [document]
+    }
   } else {
-    documentQuery = documentQuery.eq('patient_profiles.owner_user_id', userData.user.id).in('processing_status', ['queued', 'processing', 'failed_retryable']).limit(10)
+    const { data: pending, error } = await service.from('documents').select('id, patient_id, original_filename, storage_path').in('processing_status', ['queued', 'processing', 'failed_retryable']).limit(25)
+    if (error) return json({ error: error.message }, 500)
+    const patientIds = [...new Set((pending ?? []).map((document) => document.patient_id))]
+    const { data: ownedProfiles, error: profileError } = patientIds.length
+      ? await service.from('patient_profiles').select('id').in('id', patientIds).eq('owner_user_id', userData.user.id)
+      : { data: [], error: null }
+    if (profileError) return json({ error: profileError.message }, 500)
+    const ownedIds = new Set((ownedProfiles ?? []).map((profile) => profile.id))
+    documents = (pending ?? []).filter((document) => ownedIds.has(document.patient_id))
   }
-
-  const { data: documents, error } = await documentQuery
-  if (error) return json({ error: error.message }, 500)
-  if (!documents?.length) return json({ message: 'No documents to process', count: 0 })
+  if (!documents.length) return json({ message: 'No documents to process', count: 0 })
   const geminiKey = Deno.env.get('GEMINI_API_KEY')
   if (!geminiKey) return json({ error: 'GEMINI_API_KEY is not configured' }, 503)
 

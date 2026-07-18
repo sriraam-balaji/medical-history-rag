@@ -768,7 +768,7 @@ function VitalsPage({ labs, vitals, patient }: { labs: LabResult[]; vitals: Vita
             <strong>{labs.length}</strong>
           </div>
           {labs.length ? (
-            <div className="lab-list" style={{ maxHeight: '520px', overflowY: 'auto' }}>
+            <div className="lab-list">
               {labs.map((lab) => (
                 <div className="data-row" key={lab.id} style={{ padding: '8px 0' }}>
                   <strong>{lab.test_name_raw}: {lab.value_text ?? lab.numeric_value ?? '—'} {lab.unit ?? ''} {lab.reference_range ? `(doc range: ${lab.reference_range})` : ''}</strong>
