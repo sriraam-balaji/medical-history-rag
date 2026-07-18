@@ -632,7 +632,6 @@ function MedicineRow({ med, onEdit, onDelete }: { med: Medication; onEdit: (med:
         <div style={{ fontSize: '13px', color: '#62776c', display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
           <span>{[med.strength, med.dosage_form, med.route].filter(Boolean).join(' · ') || 'Details pending'}</span>
           <span style={{ color: '#b0c2b8' }}>•</span>
-          <span style={{ color: '#80968a' }}>source page {med.source_page ?? 1}</span>
         </div>
       </div>
       <div style={{ display: 'flex', gap: '6px', flexShrink: 0 }}>
@@ -699,7 +698,11 @@ function VitalsPage({ labs, vitals, patient }: { labs: LabResult[]; vitals: Vita
 
   for (const vital of vitals) {
     if (vital.value != null && Number.isFinite(Number(vital.value)) && Number(vital.value) > 0) {
-      const name = vital.vital_type
+      const rawName = vital.vital_type
+      const rawKey = testKey(rawName)
+      // The extractor stores the original BP plus a normalized systolic row.
+      // Treat them as one series so the chart does not show a duplicate trend.
+      const name = rawKey === 'blood pressure' ? 'Systolic Blood Pressure' : rawName
       const key = testKey(name)
       const current = groups.get(key) ?? { name, unit: vital.unit, points: [] }
       if (vital.measured_at) {
@@ -735,6 +738,7 @@ function VitalsPage({ labs, vitals, patient }: { labs: LabResult[]; vitals: Vita
           ))}
         </section>
       )}
+      {trends.length > 0 && <p className="trend-summary">Showing {trends.length} repeated measurements with dated numeric values. Tests with only one recorded value remain in the lists below and are not treated as trends.</p>}
       <div className="content-grid">
         <div className="panel">
           <div className="panel-head">
@@ -815,10 +819,10 @@ function TrendChart({ trend, age, sex }: { trend: { name: string; unit: string |
         {points.map((point, index) => (
           <g key={`${point.date}-${index}`}>
             <circle cx={x(index)} cy={y(point.value)} r="4.5" className="trend-dot" />
-            <text x={x(index)} y={Math.max(y(point.value) - 9, 15)} textAnchor="middle" style={{ fontSize: '11px', fontWeight: 600, fill: '#1a2e26' }}>
+            <text x={x(index)} y={Math.max(y(point.value) - 11, 18)} textAnchor="middle" style={{ fontSize: '14px', fontWeight: 700, fill: '#1a2e26' }}>
               {point.value}
             </text>
-            <text x={x(index)} y="224" textAnchor="middle" className="chart-label">
+            <text x={x(index)} y="228" textAnchor="middle" className="chart-label chart-date-label">
               {formatDateLabel(point.date)}
             </text>
           </g>
