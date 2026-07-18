@@ -682,6 +682,8 @@ function generalRange(name: string, unit: string | null, age: number | null, sex
 }
 
 function VitalsPage({ labs, vitals, patient }: { labs: LabResult[]; vitals: Vital[]; patient?: PatientProfile }) {
+  const systolicKeys = new Set(vitals.filter((v) => testKey(v.vital_type) === 'systolic blood pressure').map((v) => `${v.measured_at?.split('T')[0] ?? ''}|${v.value}`))
+  const displayVitals = vitals.filter((v) => testKey(v.vital_type) !== 'blood pressure' || !systolicKeys.has(`${v.measured_at?.split('T')[0] ?? ''}|${v.value}`))
   const groups = new Map<string, { name: string; unit: string | null; points: Array<{ date: string; value: number }> }>()
   
   for (const lab of labs) {
@@ -696,7 +698,7 @@ function VitalsPage({ labs, vitals, patient }: { labs: LabResult[]; vitals: Vita
     }
   }
 
-  for (const vital of vitals) {
+  for (const vital of displayVitals) {
     if (vital.value != null && Number.isFinite(Number(vital.value)) && Number(vital.value) > 0) {
       const rawName = vital.vital_type
       const rawKey = testKey(rawName)
@@ -739,17 +741,17 @@ function VitalsPage({ labs, vitals, patient }: { labs: LabResult[]; vitals: Vita
         </section>
       )}
       {trends.length > 0 && <p className="trend-summary">Showing {trends.length} repeated measurements with dated numeric values. Tests with only one recorded value remain in the lists below and are not treated as trends.</p>}
-      <div className="content-grid">
+      <div className="content-grid structured-grid">
         <div className="panel">
           <div className="panel-head">
             <div>
               <p className="eyebrow">VITALS</p>
               <h3>Measurements</h3>
             </div>
-            <strong>{vitals.length}</strong>
+            <strong>{displayVitals.length}</strong>
           </div>
-          {vitals.length ? (
-            vitals.map((v) => (
+          {displayVitals.length ? (
+            displayVitals.map((v) => (
               <div className="data-row" key={v.id}>
                 <strong>{v.vital_type}: {v.value} {v.unit ?? ''}</strong>
                 <span>{v.measured_at ? formatDateLabel(v.measured_at) : 'Date not recorded'} · page {v.source_page ?? '—'}</span>
