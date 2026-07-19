@@ -821,13 +821,31 @@ function VitalsPage({ labs, vitals, patient }: { labs: LabResult[]; vitals: Vita
     const dia = diastolicByKey.get(`${v.measured_at?.split('T')[0] ?? ''}|${v.source_page ?? ''}`)
     if (dia && !pairedDiastolicIds.has(dia.id)) { pairedDiastolicIds.add(dia.id); systolicPairs.set(v.id, dia) }
   }
-  const vitalRows: Array<{ id: string; label: string; date: string | null; page: number | null }> = []
+  // One row per vital type, showing the most recent reading (rows arrive newest-first).
+  const vitalLatest = new Map<string, { id: string; label: string; date: string | null; count: number }>()
   for (const v of displayVitals) {
     if (pairedDiastolicIds.has(v.id)) continue
     const dia = systolicPairs.get(v.id)
-    if (dia) vitalRows.push({ id: v.id, label: `Blood pressure: ${v.value}/${dia.value} ${v.unit ?? 'mmHg'}`, date: v.measured_at, page: v.source_page })
-    else vitalRows.push({ id: v.id, label: `${v.vital_type}: ${v.value} ${v.unit ?? ''}`.trim(), date: v.measured_at, page: v.source_page })
+    const typeKey = dia ? 'blood pressure' : testKey(v.vital_type)
+    const existing = vitalLatest.get(typeKey)
+    if (existing) { existing.count += 1; continue }
+    const label = dia
+      ? `Blood pressure: ${v.value}/${dia.value} ${v.unit ?? 'mmHg'}`
+      : `${v.vital_type}: ${v.value} ${v.unit ?? ''}`.trim()
+    vitalLatest.set(typeKey, { id: v.id, label, date: v.measured_at, count: 1 })
   }
+  const vitalRows = [...vitalLatest.values()]
+  const totalVitalReadings = displayVitals.length - pairedDiastolicIds.size
+
+  // One row per lab test, most recent value first (query returns newest-first).
+  const labLatest = new Map<string, { lab: LabResult; count: number }>()
+  for (const lab of labs) {
+    const key = testKey(lab.test_name_normalized || lab.test_name_raw)
+    const existing = labLatest.get(key)
+    if (existing) existing.count += 1
+    else labLatest.set(key, { lab, count: 1 })
+  }
+  const labRows = [...labLatest.values()]
 
   return (
     <Page title="Vitals & labs" eyebrow="STRUCTURED HISTORY">
@@ -849,15 +867,18 @@ function VitalsPage({ labs, vitals, patient }: { labs: LabResult[]; vitals: Vita
               <p className="eyebrow">VITALS</p>
               <h3>Measurements</h3>
             </div>
-            <strong>{displayVitals.length}</strong>
+            <strong>{vitalRows.length}</strong>
           </div>
           {vitalRows.length ? (
-            vitalRows.map((row) => (
-              <div className="data-row" key={row.id}>
-                <strong>{row.label}</strong>
-                <span>{row.date ? formatDateLabel(row.date) : 'Date not recorded'}</span>
-              </div>
-            ))
+            <>
+              <p className="latest-note">Latest reading per vital · {totalVitalReadings} total readings. Repeated vitals are charted above.</p>
+              {vitalRows.map((row) => (
+                <div className="data-row" key={row.id}>
+                  <strong>{row.label}</strong>
+                  <span>{row.date ? formatDateLabel(row.date) : 'Date not recorded'}{row.count > 1 ? ` · ${row.count} readings` : ''}</span>
+                </div>
+              ))}
+            </>
           ) : (
             <Empty text="No vitals extracted yet." />
           )}
@@ -868,14 +889,15 @@ function VitalsPage({ labs, vitals, patient }: { labs: LabResult[]; vitals: Vita
               <p className="eyebrow">LAB RESULTS</p>
               <h3>Latest values</h3>
             </div>
-            <strong>{labs.length}</strong>
+            <strong>{labRows.length}</strong>
           </div>
-          {labs.length ? (
+          {labRows.length ? (
             <div className="lab-list">
-              {labs.map((lab) => (
+              <p className="latest-note">Latest value per test · {labs.length} total readings. Tests with repeat readings are charted above.</p>
+              {labRows.map(({ lab, count }) => (
                 <div className="data-row" key={lab.id} style={{ padding: '8px 0' }}>
                   <strong>{lab.test_name_raw}: {lab.value_text ?? lab.numeric_value ?? '—'} {lab.unit ?? ''} {lab.reference_range ? `(doc range: ${lab.reference_range})` : ''}</strong>
-                  <span>{lab.measured_at ? formatDateLabel(lab.measured_at) : 'Date not recorded'}</span>
+                  <span>{lab.measured_at ? formatDateLabel(lab.measured_at) : 'Date not recorded'}{count > 1 ? ` · ${count} readings` : ''}</span>
                 </div>
               ))}
             </div>
@@ -962,7 +984,7 @@ function TrendChart({ trend, age, sex }: { trend: { name: string; unit: string |
           <g key={`${point.date}-${index}`}>
             <circle cx={x(index)} cy={y(point.value)} r="4.5" className="trend-dot" />
             {valueIndexes.has(index) && (
-              <text x={x(index)} y={Math.max(y(point.value) - 11, 18)} textAnchor="middle" style={{ fontSize: '13px', fontWeight: 700, fill: '#1a2e26' }}>
+              <text x={x(index)} y={Math.max(y(point.value) - 11, 20)} textAnchor="middle" style={{ fontSize: '17px', fontWeight: 700, fill: '#1a2e26' }}>
                 {point.value}
               </text>
             )}
