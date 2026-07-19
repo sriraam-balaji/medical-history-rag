@@ -38,3 +38,7 @@ body,.app-shell,.auth-shell,.auth-card,.auth-card input,.auth-card button,.auth-
 .auth-card .text-button:hover,.auth-links .text-button:hover{color:#153b34}
 .editing-row input{border:1px solid #dce6df;border-radius:8px;padding:9px 10px;font:13px inherit;outline-color:#79a88f}
 @media(max-width:560px){.medicine-edit-grid{grid-template-columns:1fr!important}}
+.chart-label{font-size:16px}
+.chart-date-label{font-size:16px}
+.chart-grid-label{font-size:14px;font-family:'DM Sans',sans-serif}
+.latest-note{margin:0 0 10px;color:#71857a;font-size:12px;line-height:1.5}
