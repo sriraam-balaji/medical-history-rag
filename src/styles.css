@@ -36,3 +36,5 @@ body,.app-shell,.auth-shell,.auth-card,.auth-card input,.auth-card button,.auth-
 .trend-latest small{font-weight:500;color:#71857a;font-size:11px}
 .auth-card .text-button,.auth-links .text-button{color:#2c6e57;font-weight:600;text-decoration:underline;text-underline-offset:3px}
 .auth-card .text-button:hover,.auth-links .text-button:hover{color:#153b34}
+.editing-row input{border:1px solid #dce6df;border-radius:8px;padding:9px 10px;font:13px inherit;outline-color:#79a88f}
+@media(max-width:560px){.medicine-edit-grid{grid-template-columns:1fr!important}}

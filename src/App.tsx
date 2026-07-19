@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Activity, AlertCircle, CheckCircle2, Clock3, FileText, HeartPulse, LoaderCircle, LogIn, Menu, Pencil, Plus, RefreshCw, Search, ShieldCheck, Trash2, Upload, UserRound } from 'lucide-react'
+import { Activity, AlertCircle, CheckCircle2, Clock3, FileText, HeartPulse, LayoutDashboard, LoaderCircle, LogIn, Menu, Pencil, Pill, Plus, RefreshCw, Search, ShieldCheck, Stethoscope, Trash2, Upload, UserRound } from 'lucide-react'
 import { supabase, supabaseConfigured } from './lib/supabase'
 import type { DocumentRecord, LabResult, MedicalEvent, Medication, PatientProfile, Vital } from './types'
 
@@ -480,6 +480,25 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
   if (recoveryMode && supabase) return <PasswordRecoveryModal newPassword={newPassword} confirmPassword={confirmPassword} setNewPassword={setNewPassword} setConfirmPassword={setConfirmPassword} authBusy={authBusy} notice={notice} onSubmit={updatePassword} />
   if (!sessionEmail) return <div className="auth-shell"><div className="auth-card"><div className="brand-mark"><HeartPulse size={22} /></div><p className="eyebrow">PRIVATE HEALTH ARCHIVE</p><h1>Keep the record together.</h1><p className="muted">A secure family workspace for documents, medicines, vitals, and timelines.</p>{!showLogin && <button className="primary full" onClick={() => setShowLogin(true)}><LogIn size={17} /> Sign in or create account</button>}<p className="tiny">Each account only sees its own patient profiles.</p>{!supabaseConfigured && <p className="notice" style={{ marginTop: '16px' }}>This deployment is missing its Supabase configuration, so sign-in is disabled. If you are the site owner, set VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY and redeploy (see README).</p>}{showLogin && <form className="login-form" onSubmit={submitAuth}><div className="auth-mode"><button type="button" className={authMode === 'signin' ? 'selected' : ''} onClick={() => { setAuthMode('signin'); setNotice('') }}>Sign in</button><button type="button" className={authMode === 'signup' ? 'selected' : ''} onClick={() => { setAuthMode('signup'); setNotice('') }}>Create account</button></div><label htmlFor="auth-email">Email address</label><input id="auth-email" type="email" required autoComplete="email" placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} /><label htmlFor="auth-password">Password</label><input id="auth-password" type="password" required minLength={6} autoComplete={authMode === 'signup' ? 'new-password' : 'current-password'} placeholder="At least 6 characters" value={password} onChange={(e) => setPassword(e.target.value)} /><button className="primary full" type="submit" disabled={authBusy}>{authBusy ? 'Please wait…' : authMode === 'signup' ? 'Create account' : 'Sign in'}</button><div className="auth-links"><button type="button" className="text-button" onClick={() => { setAuthMode(authMode === 'signup' ? 'signin' : 'signup'); setNotice('') }}>{authMode === 'signup' ? 'Already have an account? Sign in' : 'New here? Create an account'}</button>{authMode === 'signin' && <button type="button" className="text-button" onClick={resetPassword} disabled={authBusy}>Forgot password?</button>}</div></form>}{notice && <p className="notice">{notice}</p>}</div></div>
 
+  async function addMedication(brand: string, generic: string, strength: string, form: string) {
+    if (!supabase || !selectedPatient) return
+    if (!brand.trim() && !generic.trim()) { setNotice('Enter at least a brand or generic name.'); return }
+    const { error } = await supabase.from('medications').insert({
+      patient_id: selectedPatient,
+      brand_name: brand.trim() || null,
+      generic_name: generic.trim() || null,
+      strength: strength.trim() || null,
+      dosage_form: form.trim() || null,
+      composition_status: 'manual',
+      confidence: 1,
+    })
+    if (error) setNotice(`Could not add medicine: ${error.message}`)
+    else {
+      setNotice('Medicine added.')
+      await refreshPatientData(selectedPatient)
+    }
+  }
+
   async function updateMedication(ids: string[], brand: string, generic: string, strength: string, form: string) {
     if (!supabase || !ids.length) return
     const { error } = await supabase.from('medications').update({
@@ -550,7 +569,7 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
       </div>
     </Page>
   )
-    : activeTab === 'Medicines' ? <MedicinesPage medicines={medicines} onEdit={updateMedication} onDelete={deleteMedication} />
+    : activeTab === 'Medicines' ? <MedicinesPage medicines={medicines} onAdd={addMedication} onEdit={updateMedication} onDelete={deleteMedication} />
     : activeTab === 'Doctors & visits' ? <VisitPage events={events} />
     : activeTab === 'Vitals & labs' ? <Page title="Vitals & labs" eyebrow="STRUCTURED HISTORY"><div className="content-grid"><div className="panel"><div className="panel-head"><div><p className="eyebrow">VITALS</p><h3>Measurements</h3></div><strong>{vitals.length}</strong></div>{vitals.length ? vitals.map((v) => <div className="data-row" key={v.id}><strong>{v.vital_type}: {v.value} {v.unit ?? ''}</strong><span>{v.measured_at ? new Date(v.measured_at).toLocaleDateString() : 'Date not recorded'} · page {v.source_page ?? '—'}</span></div>) : <Empty text="No vitals extracted yet." />}</div><div className="panel"><div className="panel-head"><div><p className="eyebrow">LAB RESULTS</p><h3>Latest values</h3></div><strong>{labs.length}</strong></div>{labs.length ? labs.slice(0, 20).map((lab) => <div className="data-row" key={lab.id}><strong>{lab.test_name_raw}: {lab.value_text ?? lab.numeric_value ?? '—'} {lab.unit ?? ''}</strong><span>{lab.measured_at ? new Date(lab.measured_at).toLocaleDateString() : 'Date not recorded'} · page {lab.source_page ?? '—'}</span></div>) : <Empty text="No blood test reports found in uploaded documents. Medicines, clinic visits & prescriptions captured." />}</div></div></Page>
     : activeTab === 'Ask the archive' ? <Page title="Ask the archive" eyebrow="CITED SEARCH"><div className="panel full-panel ask-panel"><Search size={25} /><h3>Search across this patient’s records</h3><p className="muted">Answers use only indexed records and include source references. This is an archive search, not a diagnosis.</p><form className="ask-placeholder" onSubmit={askArchive}><input value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="e.g. What lab values changed over time?" disabled={asking} /><button className="primary" type="submit" disabled={asking || !question.trim()}>{asking ? 'Searching…' : 'Search archive'}</button></form>{answer && <div className="answer-box"><strong>Archive answer</strong><p>{answer}</p></div>}</div></Page>
@@ -559,19 +578,34 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
   const pageContent = activeTab === 'Vitals & labs' ? <VitalsPage labs={labs} vitals={vitals} patient={activePatient} /> : activeTab === 'Ask the archive' ? <AskArchivePage question={question} setQuestion={setQuestion} asking={asking} answer={answer} citations={citations} documents={documents} onAsk={askArchive} onOpenSource={openSource} /> : legacyPage
   const page = <><button className="mobile-menu-button" onClick={() => setMobileSidebarOpen(true)} aria-label="Open navigation"><Menu size={19} /> <span>Menu</span></button>{mobileSidebarOpen && <button className="mobile-sidebar-backdrop" onClick={() => setMobileSidebarOpen(false)} aria-label="Close navigation" />}{pageContent}</>
 
-  return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark"><HeartPulse size={19} /></div><div><strong>Care Archive</strong><span>family health records</span></div></div><div className="side-section"><p className="side-label">WORKSPACE</p>{tabs.map((tab) => <button className={activeTab === tab ? 'side-link active' : 'side-link'} key={tab} onClick={() => navigate(tab)}>{tab === 'Documents' ? <FileText size={16} /> : tab === 'Vitals & labs' ? <Activity size={16} /> : tab === 'Ask the archive' ? <Search size={16} /> : <HeartPulse size={16} />}{tab}</button>)}</div><div className="side-bottom"><div className="privacy"><ShieldCheck size={17} /><span><strong>Private by default</strong><small>Source pages stay attached to every fact.</small></span></div>{sessionEmail && <button className="text-button" onClick={() => supabase?.auth.signOut()}>Sign out</button>}</div></aside><main className="main"><header className="topbar"><div><p className="eyebrow">YOUR ARCHIVE</p><h2>{activeTab}</h2></div><div className="top-actions">{sessionEmail && <span className="account"><UserRound size={15} /> {sessionEmail}</span>}<label className={uploadingFiles ? 'upload-button disabled' : 'upload-button'}><Upload size={16} /> {uploadingFiles ? `Uploading ${uploadProgress}/${uploadTotal}` : 'Upload files'}<input type="file" multiple accept="application/pdf,image/*" onChange={uploadFiles} disabled={uploadingFiles} /></label></div></header><section className="patient-bar"><div><span className="field-label">PATIENT PROFILE</span><select value={selectedPatient} onChange={(e) => setSelectedPatient(e.target.value)}>{displayPatients.map((patient) => <option key={patient.id} value={patient.id}>{patient.display_name}</option>)}</select></div><button className="secondary" onClick={() => { setPatientName(''); setPatientDob(''); setPatientSex(''); setShowProfileForm(true) }} disabled={!supabase}><Plus size={16} /> New profile</button></section>{notice && <div className="notice banner">{notice}</div>}{page}</main>{showProfileForm && supabase && <div className="modal-backdrop"><section className="profile-modal" role="dialog" aria-modal="true"><div className="modal-icon"><UserRound size={20} /></div><p className="eyebrow">WELCOME TO CARE ARCHIVE</p><h2>Who are these records for?</h2><p className="muted">Optional demographics enable more relevant reference bands.</p><form onSubmit={createPatient}><label className="modal-label" htmlFor="patient-name">Patient name</label><input id="patient-name" autoFocus required placeholder="e.g. Mom, Dad, or Priya" value={patientName} onChange={(e) => setPatientName(e.target.value)} /><label className="modal-label" htmlFor="patient-dob">Date of birth (optional)</label><input id="patient-dob" type="date" value={patientDob} onChange={(e) => setPatientDob(e.target.value)} /><label className="modal-label" htmlFor="patient-sex">Sex for reference ranges (optional)</label><select id="patient-sex" value={patientSex} onChange={(e) => setPatientSex(e.target.value)}><option value="">Prefer not to say</option><option value="female">Female</option><option value="male">Male</option><option value="intersex">Intersex</option></select><div className="modal-actions">{patients.length > 0 && <button type="button" className="secondary" onClick={() => setShowProfileForm(false)}>Cancel</button>}<button type="submit" className="primary" disabled={creatingPatient}>{creatingPatient ? 'Creating…' : 'Create profile'}</button></div></form></section></div>}</div>
+  return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark"><HeartPulse size={19} /></div><div><strong>Care Archive</strong><span>family health records</span></div></div><div className="side-section"><p className="side-label">WORKSPACE</p>{tabs.map((tab) => <button className={activeTab === tab ? 'side-link active' : 'side-link'} key={tab} onClick={() => navigate(tab)}>{tab === 'Documents' ? <FileText size={16} /> : tab === 'Medicines' ? <Pill size={16} /> : tab === 'Doctors & visits' ? <Stethoscope size={16} /> : tab === 'Vitals & labs' ? <Activity size={16} /> : tab === 'Ask the archive' ? <Search size={16} /> : <LayoutDashboard size={16} />}{tab}</button>)}</div><div className="side-bottom"><div className="privacy"><ShieldCheck size={17} /><span><strong>Private by default</strong><small>Source pages stay attached to every fact.</small></span></div>{sessionEmail && <button className="text-button" onClick={() => supabase?.auth.signOut()}>Sign out</button>}</div></aside><main className="main"><header className="topbar"><div><p className="eyebrow">YOUR ARCHIVE</p><h2>{activeTab}</h2></div><div className="top-actions">{sessionEmail && <span className="account"><UserRound size={15} /> {sessionEmail}</span>}<label className={uploadingFiles ? 'upload-button disabled' : 'upload-button'}><Upload size={16} /> {uploadingFiles ? `Uploading ${uploadProgress}/${uploadTotal}` : 'Upload files'}<input type="file" multiple accept="application/pdf,image/*" onChange={uploadFiles} disabled={uploadingFiles} /></label></div></header><section className="patient-bar"><div><span className="field-label">PATIENT PROFILE</span><select value={selectedPatient} onChange={(e) => setSelectedPatient(e.target.value)}>{displayPatients.map((patient) => <option key={patient.id} value={patient.id}>{patient.display_name}</option>)}</select></div><button className="secondary" onClick={() => { setPatientName(''); setPatientDob(''); setPatientSex(''); setShowProfileForm(true) }} disabled={!supabase}><Plus size={16} /> New profile</button></section>{notice && <div className="notice banner">{notice}</div>}{page}</main>{showProfileForm && supabase && <div className="modal-backdrop"><section className="profile-modal" role="dialog" aria-modal="true"><div className="modal-icon"><UserRound size={20} /></div><p className="eyebrow">WELCOME TO CARE ARCHIVE</p><h2>Who are these records for?</h2><p className="muted">Optional demographics enable more relevant reference bands.</p><form onSubmit={createPatient}><label className="modal-label" htmlFor="patient-name">Patient name</label><input id="patient-name" autoFocus required placeholder="e.g. Mom, Dad, or Priya" value={patientName} onChange={(e) => setPatientName(e.target.value)} /><label className="modal-label" htmlFor="patient-dob">Date of birth (optional)</label><input id="patient-dob" type="date" value={patientDob} onChange={(e) => setPatientDob(e.target.value)} /><label className="modal-label" htmlFor="patient-sex">Sex for reference ranges (optional)</label><select id="patient-sex" value={patientSex} onChange={(e) => setPatientSex(e.target.value)}><option value="">Prefer not to say</option><option value="female">Female</option><option value="male">Male</option><option value="intersex">Intersex</option></select><div className="modal-actions">{patients.length > 0 && <button type="button" className="secondary" onClick={() => setShowProfileForm(false)}>Cancel</button>}<button type="submit" className="primary" disabled={creatingPatient}>{creatingPatient ? 'Creating…' : 'Create profile'}</button></div></form></section></div>}</div>
 }
 
 function PasswordRecoveryModal({ newPassword, confirmPassword, setNewPassword, setConfirmPassword, authBusy, notice, onSubmit }: { newPassword: string; confirmPassword: string; setNewPassword: (value: string) => void; setConfirmPassword: (value: string) => void; authBusy: boolean; notice: string; onSubmit: (event: React.FormEvent) => void }) { return <div className="auth-shell"><section className="auth-card recovery-card"><div className="brand-mark"><HeartPulse size={22} /></div><p className="eyebrow">PASSWORD RESET</p><h1>Choose a new password.</h1><p className="muted">Set a new password for your Care Archive account.</p><form className="login-form" onSubmit={onSubmit}><label htmlFor="new-password">New password</label><input id="new-password" type="password" minLength={6} required autoFocus value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="At least 6 characters" /><label htmlFor="confirm-password">Confirm new password</label><input id="confirm-password" type="password" minLength={6} required value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="Re-enter your password" /><button className="primary full" type="submit" disabled={authBusy}>{authBusy ? 'Updating…' : 'Update password'}</button></form>{notice && <p className="notice">{notice}</p>}</section></div> }
+// "Dr. R. Indhumathi", "DR.INDHUMATHI", and "DR INDHUMATHI" are the same person:
+// strip the Dr prefix, punctuation, single-letter initials, and credential suffixes.
+function doctorKey(name: string) {
+  const tokens = name.toLowerCase().replace(/[.,()]/g, ' ').split(/\s+/).filter(Boolean)
+  const CREDENTIALS = new Set(['dr', 'md', 'mbbs', 'ms', 'dnb', 'do', 'dm', 'phd', 'frcs', 'mch'])
+  return tokens.filter((t) => !CREDENTIALS.has(t) && t.length > 1).join(' ')
+}
+
 function VisitPage({ events }: { events: MedicalEvent[] }) {
   const visits = events.filter((event) => event.event_type === 'appointment' || event.event_type === 'consultation' || event.event_type === 'procedure').sort((a, b) => {
     if (!a.event_date) return 1
     if (!b.event_date) return -1
     return b.event_date.localeCompare(a.event_date)
   })
-  const byDoctor = new Map<string, number>()
-  for (const visit of visits) { const name = visit.doctor_name || visit.facility || 'Doctor not recorded'; byDoctor.set(name, (byDoctor.get(name) ?? 0) + 1) }
-  return <Page title="Doctors & visits" eyebrow="CARE TIMELINE"><div className="content-grid"><section className="panel"><div className="panel-head"><div><p className="eyebrow">VISIT SUMMARY</p><h3>Who was visited</h3></div><strong>{visits.length}</strong></div>{byDoctor.size ? [...byDoctor.entries()].map(([name, count]) => <div className="data-row" key={name}><strong>{name}</strong><span>{count} visit{count === 1 ? '' : 's'}</span></div>) : <Empty text="Doctor visits and facilities will appear here when the records contain them." />}</section><section className="panel"><div className="panel-head"><div><p className="eyebrow">CHRONOLOGICAL VIEW</p><h3>Visits and procedures</h3></div></div>{visits.length ? <div className="timeline-list">{visits.map((event) => <div className="timeline-item" key={event.id}><span className="timeline-date">{event.event_date ? new Date(`${event.event_date}T00:00:00`).toLocaleDateString() : 'Date unknown'}</span><div><strong>{event.doctor_name || event.title}</strong><span>{[event.specialty, event.facility, event.visit_reason || event.summary].filter(Boolean).join(' · ') || event.event_type}</span><small>Source page {event.source_page ?? '—'}</small></div></div>)}</div> : <Empty text="No dated visits or procedures extracted yet." />}</section></div></Page>
+  const byDoctor = new Map<string, { display: string; count: number }>()
+  for (const visit of visits) {
+    const name = visit.doctor_name || visit.facility || 'Doctor not recorded'
+    const key = doctorKey(name) || name.toLowerCase()
+    const existing = byDoctor.get(key)
+    // Prefer the longest variant as the display name — it usually carries initials/casing.
+    if (existing) byDoctor.set(key, { display: name.length > existing.display.length ? name : existing.display, count: existing.count + 1 })
+    else byDoctor.set(key, { display: name, count: 1 })
+  }
+  return <Page title="Doctors & visits" eyebrow="CARE TIMELINE"><div className="content-grid"><section className="panel"><div className="panel-head"><div><p className="eyebrow">VISIT SUMMARY</p><h3>Who was visited</h3></div><strong>{visits.length}</strong></div>{byDoctor.size ? [...byDoctor.values()].sort((a, b) => b.count - a.count).map(({ display, count }) => <div className="data-row" key={display}><strong>{display}</strong><span>{count} visit{count === 1 ? '' : 's'}</span></div>) : <Empty text="Doctor visits and facilities will appear here when the records contain them." />}</section><section className="panel"><div className="panel-head"><div><p className="eyebrow">CHRONOLOGICAL VIEW</p><h3>Visits and procedures</h3></div></div>{visits.length ? <div className="timeline-list">{visits.map((event) => <div className="timeline-item" key={event.id}><span className="timeline-date">{event.event_date ? new Date(`${event.event_date}T00:00:00`).toLocaleDateString() : 'Date unknown'}</span><div><strong>{event.doctor_name || event.title}</strong><span>{[event.specialty, event.facility, event.visit_reason || event.summary].filter(Boolean).join(' · ') || event.event_type}</span><small>Source page {event.source_page ?? '—'}</small></div></div>)}</div> : <Empty text="No dated visits or procedures extracted yet." />}</section></div></Page>
 }
 interface MedicineGroup { rep: Medication; ids: string[]; count: number }
 
@@ -588,8 +622,14 @@ function groupMedicines(medicines: Medication[]): MedicineGroup[] {
   return [...groups.values()]
 }
 
-function MedicinesPage({ medicines, onEdit, onDelete }: { medicines: Medication[]; onEdit: (ids: string[], brand: string, generic: string, strength: string, form: string) => Promise<void>; onDelete: (ids: string[]) => Promise<void> }) {
+function MedicinesPage({ medicines, onAdd, onEdit, onDelete }: { medicines: Medication[]; onAdd: (brand: string, generic: string, strength: string, form: string) => Promise<void>; onEdit: (ids: string[], brand: string, generic: string, strength: string, form: string) => Promise<void>; onDelete: (ids: string[]) => Promise<void> }) {
   const groups = groupMedicines(medicines)
+  const [adding, setAdding] = useState(false)
+  const [newBrand, setNewBrand] = useState('')
+  const [newGeneric, setNewGeneric] = useState('')
+  const [newStrength, setNewStrength] = useState('')
+  const [newForm, setNewForm] = useState('')
+  const [savingNew, setSavingNew] = useState(false)
   return (
     <Page title="Medicines" eyebrow="MEDICATION HISTORY">
       <div className="panel full-panel">
@@ -598,8 +638,27 @@ function MedicinesPage({ medicines, onEdit, onDelete }: { medicines: Medication[
             <p className="eyebrow">EXTRACTED MEDICINES</p>
             <h3>Prescribed or mentioned</h3>
           </div>
-          <span className="muted">{groups.length} medicine{groups.length === 1 ? '' : 's'}{groups.length !== medicines.length ? ` · ${medicines.length} mentions` : ''}</span>
+          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+            <span className="muted">{groups.length} medicine{groups.length === 1 ? '' : 's'}{groups.length !== medicines.length ? ` · ${medicines.length} mentions` : ''}</span>
+            <button type="button" className="secondary small" style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', padding: '6px 10px', fontSize: '13px' }} onClick={() => setAdding((current) => !current)}>
+              <Plus size={14} /> Add medicine
+            </button>
+          </div>
         </div>
+        {adding && (
+          <div className="data-row editing-row" style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '12px' }}>
+            <div className="medicine-edit-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+              <input placeholder="Brand name (e.g. Istamet)" value={newBrand} onChange={(e) => setNewBrand(e.target.value)} autoFocus />
+              <input placeholder="Generic name (e.g. Metformin)" value={newGeneric} onChange={(e) => setNewGeneric(e.target.value)} />
+              <input placeholder="Strength (e.g. 50/500mg)" value={newStrength} onChange={(e) => setNewStrength(e.target.value)} />
+              <input placeholder="Form (e.g. tablet)" value={newForm} onChange={(e) => setNewForm(e.target.value)} />
+            </div>
+            <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+              <button type="button" className="secondary small" onClick={() => setAdding(false)}>Cancel</button>
+              <button type="button" className="primary small" disabled={savingNew || (!newBrand.trim() && !newGeneric.trim())} onClick={async () => { setSavingNew(true); await onAdd(newBrand, newGeneric, newStrength, newForm); setSavingNew(false); setAdding(false); setNewBrand(''); setNewGeneric(''); setNewStrength(''); setNewForm('') }}>{savingNew ? 'Adding…' : 'Add medicine'}</button>
+            </div>
+          </div>
+        )}
         {groups.length ? (
           groups.map((group) => (
             <MedicineRow key={group.ids[0]} group={group} onEdit={onEdit} onDelete={onDelete} />
@@ -624,7 +683,7 @@ function MedicineRow({ group, onEdit, onDelete }: { group: MedicineGroup; onEdit
   if (editing) {
     return (
       <div className="data-row editing-row" style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '12px' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+        <div className="medicine-edit-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
           <input placeholder="Brand Name (e.g. Istamet)" value={brand} onChange={(e) => setBrand(e.target.value)} />
           <input placeholder="Generic Name (e.g. Metformin)" value={generic} onChange={(e) => setGeneric(e.target.value)} />
           <input placeholder="Strength (e.g. 50/500mg)" value={strength} onChange={(e) => setStrength(e.target.value)} />
@@ -796,7 +855,7 @@ function VitalsPage({ labs, vitals, patient }: { labs: LabResult[]; vitals: Vita
             vitalRows.map((row) => (
               <div className="data-row" key={row.id}>
                 <strong>{row.label}</strong>
-                <span>{row.date ? formatDateLabel(row.date) : 'Date not recorded'} · page {row.page ?? '—'}</span>
+                <span>{row.date ? formatDateLabel(row.date) : 'Date not recorded'}</span>
               </div>
             ))
           ) : (
@@ -816,7 +875,7 @@ function VitalsPage({ labs, vitals, patient }: { labs: LabResult[]; vitals: Vita
               {labs.map((lab) => (
                 <div className="data-row" key={lab.id} style={{ padding: '8px 0' }}>
                   <strong>{lab.test_name_raw}: {lab.value_text ?? lab.numeric_value ?? '—'} {lab.unit ?? ''} {lab.reference_range ? `(doc range: ${lab.reference_range})` : ''}</strong>
-                  <span>{lab.measured_at ? formatDateLabel(lab.measured_at) : 'Date not recorded'} · page {lab.source_page ?? '—'}</span>
+                  <span>{lab.measured_at ? formatDateLabel(lab.measured_at) : 'Date not recorded'}</span>
                 </div>
               ))}
             </div>
