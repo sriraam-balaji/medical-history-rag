@@ -1,67 +1,84 @@
 # Care Archive
 
-Private, multi-profile medical-record archive with automated Gemini document processing, structured health extraction, cited vector search, and lab trend visualization.
+**Self-hosted, private medical-record archive for families.** Upload prescriptions, lab reports, and scans; an AI pipeline extracts medicines, vitals, lab values, and doctor visits into a searchable, cited timeline — running entirely on *your own* Supabase project and Gemini API key.
 
-🌐 **Live Web Application**: [https://medical-history-rag.pages.dev](https://medical-history-rag.pages.dev)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![CI](https://github.com/sriraam-balaji/medical-history-rag/actions/workflows/ci.yml/badge.svg)](https://github.com/sriraam-balaji/medical-history-rag/actions/workflows/ci.yml)
 
----
-
-## Key Features
-
-- **Multi-Profile Family Workspace**: Manage isolated medical records, prescriptions, and vitals for family members.
-- **Automated Gemini Extraction Pipeline**: Structured parsing of handwritten doctor prescriptions, clinic letterheads (e.g., Gandhi Clinic, Gericare Hospital), Rx slips, lab reports (FBS, PPBS, HbA1c), and consultation notes using `gemini-3.1-flash-lite`.
-- **Cited Archive Search (RAG)**: Ask natural-language questions across past medical records backed by vector embeddings generated via `gemini-embedding-2` / `text-embedding-004`.
-- **Lab & Vital Trend Visualizations**: Interactive SVG chart tracking of repeated lab values and vitals against adult reference ranges.
-- **Production-Grade Auditability**: Stores raw JSON extractions in `extraction_jobs` with schema validation (`v2-canonical`) and prompt versioning.
-- **Full Provenance & Source Page Linking**: Every extracted medicine, vital, lab result, and doctor visit retains page references and raw evidence snippets linking back to source PDFs.
-- **Rate Limit & Abuse Protection**: Strict 1-retry policy per document to protect API quota.
+> ⚠️ **Not medical advice.** Care Archive is an organizational tool for your own records. Extractions can contain errors — always verify against the original document, and consult a qualified clinician for medical decisions.
 
 ---
+
+## Why
+
+Medical history for a family ends up scattered across paper prescriptions, WhatsApp photos, and lab PDFs. SaaS health apps want you to upload all of it to *their* servers. Care Archive is the self-hosted alternative: you control the database, the storage bucket, and the API keys. Clone it, plug in your own free-tier Supabase project and Gemini key, and it's yours.
+
+## Features
+
+- **Multi-profile family workspace** — isolated records per family member, enforced with Postgres Row Level Security.
+- **AI extraction pipeline** — handwritten prescriptions, lab reports, and consultation notes parsed into structured medicines, vitals, labs, and visit events (Gemini multimodal), with page-level provenance on every fact.
+- **Lab & vital trend charts** — repeated measurements plotted over a time-proportional axis against general adult reference ranges.
+- **Cited archive search (RAG)** — ask natural-language questions across a patient's records; answers cite source documents and pages (768-dim Gemini embeddings + pgvector).
+- **Auditability** — raw JSON extractions stored with prompt/schema versioning; idempotent re-extraction per document.
 
 ## Tech Stack
 
-- **Frontend**: Vite, React 18, TypeScript, Lucide Icons, Vanilla CSS
-- **Backend & Database**: Supabase (PostgreSQL with Row Level Security, Storage, Auth, Edge Functions in Deno)
-- **AI Models**: Google Gemini API (`gemini-3.1-flash-lite` for multimodal extraction, `gemini-embedding-2` / `text-embedding-004` for 768-dim embeddings)
-- **Hosting**: Cloudflare Pages (`wrangler.toml` & `public/_redirects`)
+| Layer | Tech |
+|---|---|
+| Frontend | Vite, React 19, TypeScript, plain CSS |
+| Backend | Supabase (Postgres + RLS, Auth, Storage, Deno Edge Functions) |
+| AI | Google Gemini (multimodal extraction + embeddings), pgvector |
+| Hosting | Any static host (Cloudflare Pages config included) |
 
----
+## Setup (~15 minutes)
 
-## Local Development
+### 1. Supabase project
 
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/sriraam-balaji/medical-history-rag.git
-   cd medical-history-rag
-   ```
+1. Create a project at [supabase.com](https://supabase.com) (free tier works).
+2. In the SQL Editor, run each file in [`supabase/migrations/`](supabase/migrations/) in filename order.
+3. Create a **private** Storage bucket named `medical-documents`.
+4. In Authentication → Providers → Email, disable "Confirm email" (or keep it and confirm accounts manually).
 
-2. **Configure Environment Variables**:
-   Copy `.env.example` to `.env.local`:
-   ```bash
-   cp .env.example .env.local
-   ```
-   Add your Supabase URL and Publishable/Anon key to `.env.local`.
+### 2. Edge functions
 
-3. **Install Dependencies & Run Dev Server**:
-   ```bash
-   npm install
-   npm run dev
-   ```
+```bash
+npm install
+npx supabase login
+npx supabase functions deploy enqueue-gemini-batch --project-ref YOUR_PROJECT_REF --no-verify-jwt
+npx supabase functions deploy ask-archive --project-ref YOUR_PROJECT_REF
+npx supabase secrets set GEMINI_API_KEY=your-gemini-key --project-ref YOUR_PROJECT_REF
+```
 
-4. **Database Schema & Edge Functions**:
-   - Apply migration `supabase/migrations/202607170001_initial.sql` in your Supabase SQL Editor.
-   - Deploy Edge Functions:
-     ```bash
-     npx supabase functions deploy enqueue-gemini-batch
-     npx supabase functions deploy ask-archive
-     ```
-   - Configure backend secrets in Supabase Dashboard: `GEMINI_API_KEY`.
+Get a free Gemini API key at [aistudio.google.com](https://aistudio.google.com/apikey). `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` are injected into edge functions automatically.
 
----
+### 3. Frontend
 
-## Deployment
+```bash
+cp .env.example .env.local   # fill in VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY
+npm run dev
+```
 
-Configured for static deployment on **Cloudflare Pages**:
-- **Build Output Directory**: `dist`
-- **Build Command**: `npm run build`
-- **SPA Rewrite Rule**: `public/_redirects` (`/* /index.html 200`)
+### 4. Deploy (optional)
+
+Any static host works. For Cloudflare Pages: build command `npm run build`, output directory `dist`, and set the two `VITE_*` environment variables in the Pages project settings. The SPA rewrite rule ships in `public/_redirects`.
+
+## How it works
+
+```
+Upload (PDF/photo) ──► Supabase Storage ──► enqueue-gemini-batch (edge fn)
+                                              │  Gemini multimodal extraction
+                                              ▼
+                     medicines / vitals / lab_results / medical_events tables
+                                              │  + chunked JSON → embeddings → pgvector
+                                              ▼
+                     ask-archive (edge fn) ◄── natural-language question
+                     answers grounded in retrieved chunks, with citations
+```
+
+## Contributing
+
+PRs welcome! See [CONTRIBUTING.md](CONTRIBUTING.md). Good first areas: more lab reference ranges, i18n, additional document-date formats, dark mode.
+
+## License
+
+[MIT](LICENSE)
