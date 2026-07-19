@@ -76,12 +76,14 @@ function App() {
   }, [])
 
   useEffect(() => { if (supabase && sessionEmail) loadPatients() }, [sessionEmail])
+  const hasPendingDocuments = documents.some((doc) => !['indexed', 'validated', 'failed_permanent'].includes(doc.processing_status))
   useEffect(() => {
     if (!supabase || !selectedPatient) return
     refreshPatientData(selectedPatient)
-    const timer = window.setInterval(() => refreshPatientData(selectedPatient), 5000)
+    // Poll fast only while extraction is running; slow down once everything is indexed.
+    const timer = window.setInterval(() => refreshPatientData(selectedPatient), hasPendingDocuments ? 5000 : 30000)
     return () => window.clearInterval(timer)
-  }, [selectedPatient])
+  }, [selectedPatient, hasPendingDocuments])
 
   async function refreshPatientData(patientId: string) {
     if (!supabase) return
@@ -476,14 +478,14 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
   if (recoveryMode && supabase) return <PasswordRecoveryModal newPassword={newPassword} confirmPassword={confirmPassword} setNewPassword={setNewPassword} setConfirmPassword={setConfirmPassword} authBusy={authBusy} notice={notice} onSubmit={updatePassword} />
   if (!sessionEmail) return <div className="auth-shell"><div className="auth-card"><div className="brand-mark"><HeartPulse size={22} /></div><p className="eyebrow">PRIVATE HEALTH ARCHIVE</p><h1>Keep the record together.</h1><p className="muted">A secure family workspace for documents, medicines, vitals, and timelines.</p>{!showLogin && <button className="primary full" onClick={() => setShowLogin(true)}><LogIn size={17} /> Sign in or create account</button>}<p className="tiny">Each account only sees its own patient profiles.</p>{showLogin && <form className="login-form" onSubmit={submitAuth}><div className="auth-mode"><button type="button" className={authMode === 'signin' ? 'selected' : ''} onClick={() => { setAuthMode('signin'); setNotice('') }}>Sign in</button><button type="button" className={authMode === 'signup' ? 'selected' : ''} onClick={() => { setAuthMode('signup'); setNotice('') }}>Create account</button></div><label htmlFor="auth-email">Email address</label><input id="auth-email" type="email" required autoComplete="email" placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} /><label htmlFor="auth-password">Password</label><input id="auth-password" type="password" required minLength={6} autoComplete={authMode === 'signup' ? 'new-password' : 'current-password'} placeholder="At least 6 characters" value={password} onChange={(e) => setPassword(e.target.value)} /><button className="primary full" type="submit" disabled={authBusy}>{authBusy ? 'Please wait…' : authMode === 'signup' ? 'Create account' : 'Sign in'}</button><div className="auth-links"><button type="button" className="text-button" onClick={() => { setAuthMode(authMode === 'signup' ? 'signin' : 'signup'); setNotice('') }}>{authMode === 'signup' ? 'Already have an account? Sign in' : 'New here? Create an account'}</button>{authMode === 'signin' && <button type="button" className="text-button" onClick={resetPassword} disabled={authBusy}>Forgot password?</button>}</div></form>}{notice && <p className="notice">{notice}</p>}</div></div>
 
-  async function updateMedication(med: Medication, brand: string, generic: string, strength: string, form: string) {
-    if (!supabase) return
+  async function updateMedication(ids: string[], brand: string, generic: string, strength: string, form: string) {
+    if (!supabase || !ids.length) return
     const { error } = await supabase.from('medications').update({
       brand_name: brand.trim() || null,
       generic_name: generic.trim() || null,
       strength: strength.trim() || null,
       dosage_form: form.trim() || null,
-    }).eq('id', med.id)
+    }).in('id', ids)
     if (error) setNotice(`Could not update medicine: ${error.message}`)
     else {
       setNotice('Medicine details updated.')
@@ -491,9 +493,10 @@ async function prepareFileForUpload(file: File): Promise<{ blob: Blob; contentTy
     }
   }
 
-  async function deleteMedication(id: string) {
-    if (!supabase) return
-    const { error } = await supabase.from('medications').delete().eq('id', id)
+  async function deleteMedication(ids: string[]) {
+    if (!supabase || !ids.length) return
+    if (ids.length > 1 && !window.confirm(`Delete this medicine from all ${ids.length} prescriptions it appears in?`)) return
+    const { error } = await supabase.from('medications').delete().in('id', ids)
     if (error) setNotice(`Could not delete medicine: ${error.message}`)
     else {
       setNotice('Medicine deleted.')
@@ -568,7 +571,23 @@ function VisitPage({ events }: { events: MedicalEvent[] }) {
   for (const visit of visits) { const name = visit.doctor_name || visit.facility || 'Doctor not recorded'; byDoctor.set(name, (byDoctor.get(name) ?? 0) + 1) }
   return <Page title="Doctors & visits" eyebrow="CARE TIMELINE"><div className="content-grid"><section className="panel"><div className="panel-head"><div><p className="eyebrow">VISIT SUMMARY</p><h3>Who was visited</h3></div><strong>{visits.length}</strong></div>{byDoctor.size ? [...byDoctor.entries()].map(([name, count]) => <div className="data-row" key={name}><strong>{name}</strong><span>{count} visit{count === 1 ? '' : 's'}</span></div>) : <Empty text="Doctor visits and facilities will appear here when the records contain them." />}</section><section className="panel"><div className="panel-head"><div><p className="eyebrow">CHRONOLOGICAL VIEW</p><h3>Visits and procedures</h3></div></div>{visits.length ? <div className="timeline-list">{visits.map((event) => <div className="timeline-item" key={event.id}><span className="timeline-date">{event.event_date ? new Date(`${event.event_date}T00:00:00`).toLocaleDateString() : 'Date unknown'}</span><div><strong>{event.doctor_name || event.title}</strong><span>{[event.specialty, event.facility, event.visit_reason || event.summary].filter(Boolean).join(' · ') || event.event_type}</span><small>Source page {event.source_page ?? '—'}</small></div></div>)}</div> : <Empty text="No dated visits or procedures extracted yet." />}</section></div></Page>
 }
-function MedicinesPage({ medicines, onEdit, onDelete }: { medicines: Medication[]; onEdit: (med: Medication, brand: string, generic: string, strength: string, form: string) => Promise<void>; onDelete: (id: string) => Promise<void> }) {
+interface MedicineGroup { rep: Medication; ids: string[]; count: number }
+
+function groupMedicines(medicines: Medication[]): MedicineGroup[] {
+  const groups = new Map<string, MedicineGroup>()
+  for (const med of medicines) {
+    const key = [med.brand_name, med.generic_name, med.strength, med.dosage_form]
+      .map((part) => (part ?? '').trim().toLowerCase())
+      .join('|')
+    const existing = groups.get(key)
+    if (existing) groups.set(key, { ...existing, ids: [...existing.ids, med.id], count: existing.count + 1 })
+    else groups.set(key, { rep: med, ids: [med.id], count: 1 })
+  }
+  return [...groups.values()]
+}
+
+function MedicinesPage({ medicines, onEdit, onDelete }: { medicines: Medication[]; onEdit: (ids: string[], brand: string, generic: string, strength: string, form: string) => Promise<void>; onDelete: (ids: string[]) => Promise<void> }) {
+  const groups = groupMedicines(medicines)
   return (
     <Page title="Medicines" eyebrow="MEDICATION HISTORY">
       <div className="panel full-panel">
@@ -577,11 +596,11 @@ function MedicinesPage({ medicines, onEdit, onDelete }: { medicines: Medication[
             <p className="eyebrow">EXTRACTED MEDICINES</p>
             <h3>Prescribed or mentioned</h3>
           </div>
-          <span className="muted">{medicines.length} medicine{medicines.length === 1 ? '' : 's'}</span>
+          <span className="muted">{groups.length} medicine{groups.length === 1 ? '' : 's'}{groups.length !== medicines.length ? ` · ${medicines.length} mentions` : ''}</span>
         </div>
-        {medicines.length ? (
-          medicines.map((med) => (
-            <MedicineRow key={med.id} med={med} onEdit={onEdit} onDelete={onDelete} />
+        {groups.length ? (
+          groups.map((group) => (
+            <MedicineRow key={group.ids[0]} group={group} onEdit={onEdit} onDelete={onDelete} />
           ))
         ) : (
           <Empty text="Medicines will appear here when the extraction pipeline finds them." />
@@ -591,7 +610,8 @@ function MedicinesPage({ medicines, onEdit, onDelete }: { medicines: Medication[
   )
 }
 
-function MedicineRow({ med, onEdit, onDelete }: { med: Medication; onEdit: (med: Medication, brand: string, generic: string, strength: string, form: string) => Promise<void>; onDelete: (id: string) => Promise<void> }) {
+function MedicineRow({ group, onEdit, onDelete }: { group: MedicineGroup; onEdit: (ids: string[], brand: string, generic: string, strength: string, form: string) => Promise<void>; onDelete: (ids: string[]) => Promise<void> }) {
+  const med = group.rep
   const [editing, setEditing] = useState(false)
   const [brand, setBrand] = useState(med.brand_name || '')
   const [generic, setGeneric] = useState(med.generic_name || '')
@@ -610,7 +630,7 @@ function MedicineRow({ med, onEdit, onDelete }: { med: Medication; onEdit: (med:
         </div>
         <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
           <button type="button" className="secondary small" onClick={() => setEditing(false)}>Cancel</button>
-          <button type="button" className="primary small" disabled={saving} onClick={async () => { setSaving(true); await onEdit(med, brand, generic, strength, form); setSaving(false); setEditing(false) }}>{saving ? 'Saving…' : 'Save changes'}</button>
+          <button type="button" className="primary small" disabled={saving} onClick={async () => { setSaving(true); await onEdit(group.ids, brand, generic, strength, form); setSaving(false); setEditing(false) }}>{saving ? 'Saving…' : 'Save changes'}</button>
         </div>
       </div>
     )
@@ -631,12 +651,12 @@ function MedicineRow({ med, onEdit, onDelete }: { med: Medication; onEdit: (med:
         </div>
         <div style={{ fontSize: '13px', color: '#62776c', display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
           <span>{[med.strength, med.dosage_form, med.route].filter(Boolean).join(' · ') || 'Details pending'}</span>
-          <span style={{ color: '#b0c2b8' }}>•</span>
+          {group.count > 1 && <span className="mention-badge" style={{ background: '#eef6ef', border: '1px solid #cfe4d4', borderRadius: '999px', padding: '1px 8px', fontSize: '12px', color: '#3c6350' }}>{group.count} prescriptions</span>}
         </div>
       </div>
       <div style={{ display: 'flex', gap: '6px', flexShrink: 0 }}>
         <button type="button" className="retry-button" onClick={() => setEditing(true)} title="Edit medicine details" aria-label="Edit medicine"><Pencil size={14} /></button>
-        <button type="button" className="delete-button" onClick={() => onDelete(med.id)} title="Delete medicine" aria-label="Delete medicine"><Trash2 size={14} /></button>
+        <button type="button" className="delete-button" onClick={() => onDelete(group.ids)} title="Delete medicine" aria-label="Delete medicine"><Trash2 size={14} /></button>
       </div>
     </div>
   )
@@ -663,7 +683,7 @@ function generalRange(name: string, unit: string | null, age: number | null, sex
   if ((key.includes('glucose') || key === 'fbs') && (u.includes('mg/dl') || !u)) return [70, 99]
   if (key === 'ppbs' && (u.includes('mg/dl') || !u)) return [70, 140]
   if (key.includes('hba1c')) return [4.0, 5.7]
-  if (key.includes('systolic') || key === 'blood pressure' || key === 'blood pressure') return [90, 120]
+  if (key.includes('systolic') || key === 'blood pressure') return [90, 120]
   if (key.includes('diastolic')) return [60, 80]
   if (key.includes('esr') || key.includes('erythrocyte sedimentation')) return [0, 20]
   if (key.includes('leucocyte') || key.includes('wbc') || key.includes('leukocyte')) return [4000, 11000]
@@ -728,6 +748,26 @@ function VitalsPage({ labs, vitals, patient }: { labs: LabResult[]; vitals: Vita
   const trends = [...groups.values()].filter((group) => group.points.length > 1).sort((a, b) => a.name.localeCompare(b.name))
   const age = patientAge(patient?.date_of_birth)
 
+  // Pair systolic + diastolic readings taken together into a single "120/80" row.
+  const diastolicByKey = new Map<string, Vital>()
+  for (const v of displayVitals) {
+    if (testKey(v.vital_type) === 'diastolic blood pressure') diastolicByKey.set(`${v.measured_at?.split('T')[0] ?? ''}|${v.source_page ?? ''}`, v)
+  }
+  const pairedDiastolicIds = new Set<string>()
+  const systolicPairs = new Map<string, Vital>()
+  for (const v of displayVitals) {
+    if (testKey(v.vital_type) !== 'systolic blood pressure') continue
+    const dia = diastolicByKey.get(`${v.measured_at?.split('T')[0] ?? ''}|${v.source_page ?? ''}`)
+    if (dia && !pairedDiastolicIds.has(dia.id)) { pairedDiastolicIds.add(dia.id); systolicPairs.set(v.id, dia) }
+  }
+  const vitalRows: Array<{ id: string; label: string; date: string | null; page: number | null }> = []
+  for (const v of displayVitals) {
+    if (pairedDiastolicIds.has(v.id)) continue
+    const dia = systolicPairs.get(v.id)
+    if (dia) vitalRows.push({ id: v.id, label: `Blood pressure: ${v.value}/${dia.value} ${v.unit ?? 'mmHg'}`, date: v.measured_at, page: v.source_page })
+    else vitalRows.push({ id: v.id, label: `${v.vital_type}: ${v.value} ${v.unit ?? ''}`.trim(), date: v.measured_at, page: v.source_page })
+  }
+
   return (
     <Page title="Vitals & labs" eyebrow="STRUCTURED HISTORY">
       <div className="reference-note">
@@ -750,11 +790,11 @@ function VitalsPage({ labs, vitals, patient }: { labs: LabResult[]; vitals: Vita
             </div>
             <strong>{displayVitals.length}</strong>
           </div>
-          {displayVitals.length ? (
-            displayVitals.map((v) => (
-              <div className="data-row" key={v.id}>
-                <strong>{v.vital_type}: {v.value} {v.unit ?? ''}</strong>
-                <span>{v.measured_at ? formatDateLabel(v.measured_at) : 'Date not recorded'} · page {v.source_page ?? '—'}</span>
+          {vitalRows.length ? (
+            vitalRows.map((row) => (
+              <div className="data-row" key={row.id}>
+                <strong>{row.label}</strong>
+                <span>{row.date ? formatDateLabel(row.date) : 'Date not recorded'} · page {row.page ?? '—'}</span>
               </div>
             ))
           ) : (
@@ -796,9 +836,42 @@ function TrendChart({ trend, age, sex }: { trend: { name: string; unit: string |
   const padding = Math.max((max - min) * 0.2, 0.5)
   const low = min - padding
   const high = max + padding
-  const x = (index: number) => 54 + (index * 530) / Math.max(points.length - 1, 1)
+
+  // Time-proportional x-axis so gaps between visits read truthfully.
+  // Falls back to even spacing when all points share (nearly) the same date.
+  const t0 = new Date(points[0].date).getTime()
+  const t1 = new Date(points[points.length - 1].date).getTime()
+  const span = t1 - t0
+  const DAY = 86400000
+  const x = (index: number) => {
+    if (span < DAY) return 54 + (index * 530) / Math.max(points.length - 1, 1)
+    return 54 + ((new Date(points[index].date).getTime() - t0) / span) * 530
+  }
   const y = (value: number) => 195 - ((value - low) / (high - low || 1)) * 145
   const line = points.map((point, index) => `${x(index)},${y(point.value)}`).join(' ')
+
+  // Only label dates that have breathing room, but always keep first and last.
+  const MIN_LABEL_GAP = 88
+  const labelledIndexes = new Set<number>()
+  let lastLabelX = -Infinity
+  points.forEach((_, index) => {
+    const px = x(index)
+    const lastX = x(points.length - 1)
+    if (index === points.length - 1 || (px - lastLabelX >= MIN_LABEL_GAP && lastX - px >= MIN_LABEL_GAP)) {
+      labelledIndexes.add(index)
+      lastLabelX = px
+    }
+  })
+
+  // Value labels: all when sparse, otherwise just first, last, min, and max.
+  const showAllValues = points.length <= 7
+  const minIndex = values.indexOf(Math.min(...values))
+  const maxIndex = values.indexOf(Math.max(...values))
+  const valueIndexes = new Set(showAllValues ? points.map((_, i) => i) : [0, points.length - 1, minIndex, maxIndex])
+
+  const latest = points[points.length - 1]
+  const gridValues = [low + (high - low) * 0.25, low + (high - low) * 0.5, low + (high - low) * 0.75]
+  const formatGrid = (value: number) => Math.abs(value) >= 100 ? Math.round(value).toString() : value.toFixed(1).replace(/\.0$/, '')
 
   return (
     <article className="panel trend-card">
@@ -807,9 +880,15 @@ function TrendChart({ trend, age, sex }: { trend: { name: string; unit: string |
           <p className="eyebrow">TREND</p>
           <h3>{trend.name}</h3>
         </div>
-        <span className="muted">{trend.unit ?? ''}</span>
+        <span className="trend-latest">{latest.value} {trend.unit ?? ''}<small>{formatDateLabel(latest.date)}</small></span>
       </div>
       <svg viewBox="0 0 640 240" role="img" aria-label={`${trend.name} over time`} className="trend-svg">
+        {gridValues.map((value) => (
+          <g key={value}>
+            <line x1="48" y1={y(value)} x2="608" y2={y(value)} className="chart-grid" />
+            <text x="44" y={y(value) + 4} textAnchor="end" className="chart-grid-label">{formatGrid(value)}</text>
+          </g>
+        ))}
         <line x1="48" y1="205" x2="608" y2="205" className="chart-axis" />
         {range && (
           <>
@@ -821,12 +900,16 @@ function TrendChart({ trend, age, sex }: { trend: { name: string; unit: string |
         {points.map((point, index) => (
           <g key={`${point.date}-${index}`}>
             <circle cx={x(index)} cy={y(point.value)} r="4.5" className="trend-dot" />
-            <text x={x(index)} y={Math.max(y(point.value) - 11, 18)} textAnchor="middle" style={{ fontSize: '14px', fontWeight: 700, fill: '#1a2e26' }}>
-              {point.value}
-            </text>
-            <text x={x(index)} y="228" textAnchor="middle" className="chart-label chart-date-label">
-              {formatDateLabel(point.date)}
-            </text>
+            {valueIndexes.has(index) && (
+              <text x={x(index)} y={Math.max(y(point.value) - 11, 18)} textAnchor="middle" style={{ fontSize: '13px', fontWeight: 700, fill: '#1a2e26' }}>
+                {point.value}
+              </text>
+            )}
+            {labelledIndexes.has(index) && (
+              <text x={x(index)} y="228" textAnchor="middle" className="chart-label chart-date-label">
+                {formatDateLabel(point.date)}
+              </text>
+            )}
           </g>
         ))}
       </svg>

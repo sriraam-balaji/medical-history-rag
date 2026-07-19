@@ -451,21 +451,6 @@ async function indexExtraction(service: ReturnType<typeof createClient>, documen
           })
         }
 
-        const genBpKey = `blood_pressure|${sys}|${measuredAt?.split('T')[0]}|${pageNum}`
-        if (!seenVitalKeys.has(genBpKey)) {
-          seenVitalKeys.add(genBpKey)
-          vitals.push({
-            patient_id: document.patient_id,
-            vital_type: 'blood_pressure',
-            value: sys,
-            unit: v.unit ?? 'mmHg',
-            measured_at: measuredAt,
-            source_document_id: document.id,
-            source_page: pageNum,
-            evidence: JSON.stringify(v),
-            confidence: v.certainty === 'explicit' ? 0.95 : 0.8,
-          })
-        }
       }
 
       if (dia && Number.isFinite(dia)) {

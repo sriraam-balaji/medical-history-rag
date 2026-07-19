@@ -30,3 +30,7 @@ body,.app-shell,.auth-shell,.auth-card,.auth-card input,.auth-card button,.auth-
 .structured-grid{grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}.structured-grid .panel{width:100%;min-width:0}.structured-grid .lab-list{max-height:none!important;overflow:visible!important}
 @media(max-width:520px){.trend-grid{gap:12px}.trend-card{padding:14px}.trend-card .panel-head{align-items:flex-start;gap:8px}.trend-card .panel-head h3{font-size:16px;line-height:1.2}.trend-svg{min-height:185px}.chart-label{font-size:16px}.chart-date-label{font-size:15px}.trend-summary{font-size:12px}.data-row{gap:10px;align-items:flex-start;flex-wrap:wrap}.data-row>span{width:100%;text-align:left;font-size:12px}.medicine-info{flex:1;min-width:0}.medicine-info>div:last-child{font-size:12px!important}.medicine-info+div{align-self:flex-start}}
 @media(max-width:850px){.structured-grid{grid-template-columns:1fr}.structured-grid .panel{width:100%}}
+.chart-grid{stroke:#eaf1ec;stroke-width:1}
+.chart-grid-label{fill:#9fb2a7;font:10px 'DM Sans',sans-serif}
+.trend-latest{display:flex;flex-direction:column;align-items:flex-end;gap:2px;font-weight:700;color:#1a2e26;font-size:15px;white-space:nowrap}
+.trend-latest small{font-weight:500;color:#71857a;font-size:11px}
