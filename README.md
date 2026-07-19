@@ -7,6 +7,17 @@
 
 > ⚠️ **Not medical advice.** Care Archive is an organizational tool for your own records. Extractions can contain errors — always verify against the original document, and consult a qualified clinician for medical decisions.
 
+![Lab and vital trend charts](docs/screenshots/vitals-labs.png)
+
+<details>
+<summary>More screenshots</summary>
+
+![Overview dashboard](docs/screenshots/overview.png)
+
+</details>
+
+*Screenshots show demo data, not real records.*
+
 ---
 
 ## Why
