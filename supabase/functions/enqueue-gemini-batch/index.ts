@@ -11,7 +11,7 @@ const MODEL = 'gemini-3.1-flash-lite'
 const PROMPT = `You are an information extraction system for a medical archive. Your task is to classify the document and extract only information explicitly present in the document. Do not summarize, interpret, diagnose, or infer medical conclusions.
 
 ### CLASSIFICATION DEFINITIONS:
-- "medical_document": Contains clinical health information such as doctor prescriptions (handwritten or printed), clinic letterheads (e.g. Gandhi Clinic, Gericare Hospital), Rx slips, laboratory blood tests (FBS, PPBS, HbA1c), imaging reports, discharge summaries, vaccination records, consultation notes, or hospital bills.
+- "medical_document": Contains clinical health information such as doctor prescriptions (handwritten or printed), clinic letterheads, Rx slips, laboratory blood tests (FBS, PPBS, HbA1c), imaging reports, discharge summaries, vaccination records, consultation notes, or hospital bills.
 - "non_medical": Contains zero health or clinical information.
 - "uncertain": The scan quality or content is insufficient to determine clinical nature.
 
@@ -100,9 +100,9 @@ Return ONLY a valid JSON object matching this exact structure:
   "medical_events": [
     {
       "event_type": "consultation",
-      "title": "Consultation at Gandhi Clinic",
-      "doctor_name": "Dr R Indhumathi",
-      "facility": "Gandhi Clinic",
+      "title": "Consultation at Sunrise Clinic",
+      "doctor_name": "Dr A Sharma",
+      "facility": "Sunrise Clinic",
       "visit_reason": null,
       "event_date": "2025-11-06",
       "date_text": "06/11/2025",
